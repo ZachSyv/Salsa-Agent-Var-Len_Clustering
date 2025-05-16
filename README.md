@@ -100,7 +100,7 @@ python Train_motionllm_sals.py   --task none   --data_root ./data/salsa.lmdb   -
 ### Fine-tuning
 Resume from the pretraining checkpoint:
 ```bash
-python Train_motionllm_sals.py   --task finetune   --pretrained_ckpt ./checkpoints/pretrain/latest.pt   --data_root ./data/salsa.lmdb   --save_dir ./checkpoints/finetune
+python Train_motionllm_sals.py   --task leader_to_follower --pretrained_ckpt ./checkpoints/pretrained_all/salsa_agent.pt --data_root ./data/salsa.lmdb --save_dir ./checkpoints/leader_to_follower
 ```
 
 ---
