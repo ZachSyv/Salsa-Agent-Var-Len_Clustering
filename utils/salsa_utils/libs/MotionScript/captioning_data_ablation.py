@@ -1,4 +1,4 @@
-from MotionScript.captioning_data import *
+from utils.salsa_utils.libs.MotionScript.captioning_data import *
 ENHANCE_TEXT_1CMPNT_Motion__ABLATION_INTENSITY = {
     # ---------------------------------------------
     # Angular

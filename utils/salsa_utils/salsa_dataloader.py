@@ -1,9 +1,9 @@
 """create data samples
 """
 import os
-os.chdir(r'S:\Payam\Dance_Salsa_SFU\Motion-Agent-Salsa')
+
 import sys
-sys.path.append(r'S:\Payam\Dance_Salsa_SFU\Motion-Agent-Salsa')
+
 import math
 import pickle
 import os
@@ -127,9 +127,9 @@ class Motion_tokenizer:
         print(f"Org Motion saved to {filename}")
 
 
-from WavTokenizer.encoder.utils import convert_audio
+from utils.salsa_utils.libs.WavTokenizer.encoder.utils import convert_audio
 
-from WavTokenizer.decoder.pretrained import WavTokenizer
+from utils.salsa_utils.libs.WavTokenizer.decoder.pretrained import WavTokenizer
 
 class Audio_tokenizer:
 
@@ -160,7 +160,7 @@ class Audio_tokenizer:
         return wav, 24000
 
 # from MotionScript.captioning_motion_Salsa import MotionScript_Forward_Salsa
-import MotionScript.captioning_motion_Salsa as MS_Salsa
+import utils.salsa_utils.libs.MotionScript.captioning_motion_Salsa as MS_Salsa
 # class MotionScript:
 #
 #     def __init__(self, args):

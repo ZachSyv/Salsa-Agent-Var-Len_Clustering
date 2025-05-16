@@ -10,9 +10,9 @@ import torch
 import numpy as np
 import math
 
-from MotionScript.captioning_data import POSECODE_OPERATORS_VALUES, MOTIONCODE_OPERATORS_VALUES, TIMECODE_OPERTATOR_VALUES # ADD_POSECODE_KIND
+from utils.salsa_utils.libs.MotionScript.captioning_data import POSECODE_OPERATORS_VALUES, MOTIONCODE_OPERATORS_VALUES, TIMECODE_OPERTATOR_VALUES # ADD_POSECODE_KIND
 
-from MotionScript.MS_Algorithms import single_path_finder
+from utils.salsa_utils.libs.MotionScript.MS_Algorithms import single_path_finder
 
 # Classes:
 # - Posecode (to be inherited from)

@@ -279,7 +279,7 @@ def eulerangles_to_rotvec(thetax, thetay, thetaz):
 import os
 import numpy as np
 
-import MotionScript.ms_config as config
+import utils.salsa_utils.libs.MotionScript.ms_config as config
 
 
 def read_posescript_json(relative_filepath):

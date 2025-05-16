@@ -17,26 +17,26 @@ from human_body_prior.body_model.body_model import BodyModel
 import numpy as np
 import sys
 
-from MotionScript.captioning_data import AUGMENTATION_LENGTH, AUGMENTATION_PORTION
+from utils.salsa_utils.libs.MotionScript.captioning_data import AUGMENTATION_LENGTH, AUGMENTATION_PORTION
 
 # local_path = "/localhome/pjomeyaz/Payam_Files/Projects/Gestcription/posescript/src/"
 # sys.path.append(local_path)
 
 
 
-import MotionScript.ms_config as config
-import MotionScript.ms_utils as utils
-import MotionScript.ms_utils_visu as utils_visu
-import MotionScript.captioning as captioning_py
+import utils.salsa_utils.libs.MotionScript.ms_config as config
+import utils.salsa_utils.libs.MotionScript.ms_utils as utils
+import utils.salsa_utils.libs.MotionScript.ms_utils_visu as utils_visu
+import utils.salsa_utils.libs.MotionScript.captioning as captioning_py
 import warnings
 warnings.filterwarnings('ignore')
 import torch
 import nltk
 
 
-from MotionScript.MS_Algorithms import create_gif_with_blinking, merge_gifs_side_by_side
+from utils.salsa_utils.libs.MotionScript.MS_Algorithms import create_gif_with_blinking, merge_gifs_side_by_side
 from tqdm import tqdm
-from MotionScript.stmc_renderer.humor import HumorRenderer
+from utils.salsa_utils.libs.MotionScript.stmc_renderer.humor import HumorRenderer
 # get pose information
 # dataID_2_pose_info = utils.read_posescript_json("ids_2_dataset_sequence_and_frame_index.json")
 

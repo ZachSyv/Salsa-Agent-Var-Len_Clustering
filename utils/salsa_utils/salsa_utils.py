@@ -16,12 +16,12 @@ from moviepy.editor import VideoFileClip
 import librosa
 import soundfile as sf
 import torchaudio
-#Todo: ---------------------<HumanML3D-Functions>--------------------------------
-#Todo: --------------------------------------------------------------------------
+import argparse
+import math
+from tqdm import tqdm
+print(os.getcwd())
+from utils.salsa_utils.libs.MotionScript.stmc_renderer.humor import HumorRenderer
 
-
-#Todo: ---------------------</HumanML3D-Functions>--------------------------------
-#Todo: --------------------------------------------------------------------------
 def salsa_smplx_to_pos3d(data):
     smplx = None
     joints_num = 22 # to be consistent with HumanML3D
@@ -30,7 +30,7 @@ def salsa_smplx_to_pos3d(data):
     #     batch_size=len(data['betas']), num_betas=10, use_pca=False, use_face_contour=True, flat_hand_mean=True)
     frames = data['poses'].shape[0]
     b = np.repeat(data['betas'][:10], frames).reshape((frames, 10))
-    smplx = SMPLX(model_path='SMPLX_DEP\\models_lockedhead\\smplx', betas=b,
+    smplx = SMPLX(model_path='body_model\\models_lockedhead\\smplx', betas=b,
                   gender=np.array2string(data['gender'])[1:-1], \
                   batch_size=len(b), num_betas=10, use_pca=False, use_face_contour=True, flat_hand_mean=True)
 
@@ -75,9 +75,7 @@ def salsa_smplx_to_pos3d(data):
 
     return keypoints3d
 
-import math
-from tqdm import tqdm
-from MotionScript.stmc_renderer.humor import HumorRenderer
+
 def sanity_check_vide(data):
 
     frames = data['poses'].shape[0]
@@ -367,9 +365,9 @@ def read_all_salsa(base_path):
 
 
 
-def read_all_salsa_pairs(base_path):
+def read_all_salsa_pairs(salsa_data_root, save_path):
 
-    out_path = os.path.join(base_path, 'lmdb_Salsa_pair')
+    out_path = os.path.join(save_path, 'lmdb_Salsa_pair')
     if not os.path.exists(out_path):
         os.makedirs(out_path)
 
@@ -388,11 +386,11 @@ def read_all_salsa_pairs(base_path):
     all_rotmat = []
 
 
-    smpl_root = 'S:\Payam\Dance_Salsa_SFU\delivery_241121\delivery_241121'
-    pos3d_root = './salsa_data/motion/pos3d'
-    rotmat_root = './salsa_data/motion/rotmat'
+    smpl_root = salsa_data_root#
+    pos3d_root = os.path.join(save_path, './salsa_data/motion/pos3d')
+    rotmat_root = os.path.join(save_path, './salsa_data/motion/rotmat')
 
-    mp4_root = 'S:\Payam\Dance_Salsa_SFU\salsa project\salsa project\Animations'
+    mp4_root = 'S:\Payam\Dance_Salsa_SFU\salsa project\salsa project\Animations' # os.path.join(salsa_data_root, 'synced_music')
     mp4_files = glob(os.path.join(mp4_root, '*.mp4'))
     smplx2mp4_map = {os.path.basename(f).replace('.mp4', ''): f for f in mp4_files}
 
@@ -403,8 +401,8 @@ def read_all_salsa_pairs(base_path):
     fps = 30
 
     for folder in os.listdir(smpl_root):
-        # if v_i>2:
-        #     break
+        if v_i>2:
+            break
         print(folder)
         smplx_folder = os.path.join(smpl_root, folder)
         pos3d_folder = os.path.join(pos3d_root, folder)
@@ -602,4 +600,17 @@ def read_all_salsa_pairs(base_path):
         db[i].sync()
         db[i].close()
 
-read_all_salsa_pairs('Salsa_Temp')
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Specify the path to the SALSA data root.")
+    parser.add_argument("--salsa_data_root", type=str, required=True, help="Path to the SALSA data directory.")
+    args = parser.parse_args()
+
+    print(f"SALSA data root: {args.salsa_data_root}")
+
+
+    read_all_salsa_pairs(args.salsa_data_root, 'dataset_processed')
+
+
+

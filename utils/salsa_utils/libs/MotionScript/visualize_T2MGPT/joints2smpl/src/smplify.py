@@ -12,7 +12,7 @@ from customloss import (camera_fitting_loss,
                         body_fitting_loss_3d, 
                         )
 from prior import MaxMixturePrior
-from MotionScript.visualize_T2MGPT.joints2smpl.src import config
+from utils.salsa_utils.libs.MotionScript.visualize_T2MGPT.joints2smpl.src import config
 
 
 

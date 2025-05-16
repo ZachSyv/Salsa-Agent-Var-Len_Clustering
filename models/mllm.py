@@ -31,7 +31,7 @@ class MotionLLM(nn.Module):
             task_type="CAUSAL_LM",
             # trainable_token_indices=[20]
         )
-        if for_old_model_inference:
+        if args.is_baseline:
             self.lora_config_m2t = LoraConfig(
                 r=self.args.lora_r_m2t,
                 lora_alpha=self.args.lora_alpha_m2t,
@@ -44,9 +44,8 @@ class MotionLLM(nn.Module):
 
         self.load_motionvq()
 
-        # Todo: for now we move the PEFT to the end and add embed_tokens
-        #
-        if for_old_model_inference:
+
+        if args.is_baseline:
             self.llm = get_peft_model(self.llm, self.lora_config_t2m, adapter_name='t2m')
             self.llm.add_adapter('m2t', self.lora_config_m2t)
 
@@ -63,12 +62,10 @@ class MotionLLM(nn.Module):
         self.llm.resize_token_embeddings(len(self.tokenizer))
 
 
-        # Todo: Load the old model here and then add extra tokens
-        # if for_old_model_inference:
-        #     if args.resume_ckpt:
-        #         self.load_model(args.resume_ckpt)
-
-        if PAIR and not for_old_model_inference:
+        if args.is_baseline: # Baseline model architecture
+            self.llm = get_peft_model(self.llm, self.lora_config_t2m, adapter_name='t2m')
+            self.llm.add_adapter('m2t', self.lora_config_m2t)
+        else:
             NUM_AUDIO_TOKENS = 4096
             audio_token_range = [f"<Audio_{i}>" for i in range(NUM_AUDIO_TOKENS)]
             Salsa_special_tokens = [
@@ -120,9 +117,8 @@ class MotionLLM(nn.Module):
 
             embeddings = pefti_llm.get_input_embeddings().weight[self.nb_text_tokens:]
             lm_head = pefti_llm.lm_head.weight[self.nb_text_tokens:]
-        else: # inference old model
-            self.llm = get_peft_model(self.llm, self.lora_config_t2m, adapter_name='t2m')
-            self.llm.add_adapter('m2t', self.lora_config_m2t)
+
+
         self.llm.to(self.device)
         self.llm.eval()
 

@@ -1,9 +1,9 @@
 # This code is based on https://github.com/Mathux/ACTOR.git
 import torch
-import MotionScript.visualize_T2MGPT.rotation_conversions as geometry
+import utils.salsa_utils.libs.MotionScript.visualize_T2MGPT.rotation_conversions as geometry
 
 
-from MotionScript.visualize_T2MGPT.smpl import SMPL, JOINTSTYPE_ROOT
+from utils.salsa_utils.libs.MotionScript.visualize_T2MGPT.smpl import SMPL, JOINTSTYPE_ROOT
 # from .get_model import JOINTSTYPES
 JOINTSTYPES = ["a2m", "a2mpl", "smpl", "vibe", "vertices"]
 

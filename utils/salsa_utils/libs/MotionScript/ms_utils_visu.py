@@ -22,7 +22,7 @@ import mpl_toolkits.mplot3d.axes3d as p3
 import numpy as np
 import io
 import imageio
-import MotionScript.ms_utils as utils
+import utils.salsa_utils.libs.MotionScript.ms_utils as utils
 
 print("Simply reruning the app (hamburger menu > 'Rerun') may be enough to get rid of a potential 'GLError'.")
 
@@ -549,8 +549,8 @@ import trimesh
 from pyrender.constants import RenderFlags
 
 
-from MotionScript.visualize_T2MGPT.simplify_loc2rot import joints2smpl
-from MotionScript.visualize_T2MGPT.rotation2xyz import Rotation2xyz
+from utils.salsa_utils.libs.MotionScript.visualize_T2MGPT.simplify_loc2rot import joints2smpl
+from utils.salsa_utils.libs.MotionScript.visualize_T2MGPT.rotation2xyz import Rotation2xyz
 from shapely import geometry
 from trimesh import Trimesh
 
@@ -682,7 +682,7 @@ def renderT2M_GPT(motions, outdir='test_vis', device_id=0, name=None, pred=True)
     else:
         imageio.mimsave(outdir + name + '_gt.gif', out, duration=1000* 1/20)
 
-from MotionScript.stmc_renderer.humor import HumorRenderer
+from utils.salsa_utils.libs.MotionScript.stmc_renderer.humor import HumorRenderer
 def render_HQ_Salsa(motions, outdir='test_vis', device_id=0, name=None, pred=True):
     R_x = np.array([
         [1, 0, 0],
