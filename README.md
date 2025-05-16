@@ -45,17 +45,18 @@ bash prepare/download_extractor.sh # Evaluation extractor models
    ```
    ./utils/salsa_utils/lib/MotionScript/data/smplh_amass
    ```
-3. **MotionScript**: We use MotionScript for data augmentation during pretraining [@motionscript]. Ensure the `data` folder contains the SMPL-H files above.
+3. **MotionScript**: We use MotionScript for data augmentation during pretraining [motionscript](https://arxiv.org/pdf/2312.12634). Ensure the `data` folder contains the SMPL-H files above.
 
 ### 4. Install WaveTokenizer
-The salsa demo uses a WaveTokenizer for audio tokenization at 40 tokens/sec:
+We use a WaveTokenizer for audio tokenization at 40 tokens/sec:
 1. Clone & install per instructions:
+2. Follow the instruction provided here: [https://github.com/jishengpeng/WavTokenizer/tree/main](https://github.com/jishengpeng/WavTokenizer/tree/main)
    ```bash
    git clone https://github.com/YourOrg/WaveTokenizer.git utils/salsa_utils/lib/wavetokenizer
    cd utils/salsa_utils/lib/wavetokenizer
    python setup.py install
    ```
-2. Add to Python path (e.g., in `~/.bashrc`):
+3. Add to Python path (e.g., in `~/.bashrc`):
    ```bash
    export PYTHONPATH="$PYTHONPATH:$(pwd)/utils/salsa_utils/lib/wavetokenizer"
    ```
