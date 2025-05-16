@@ -142,4 +142,4 @@ We thank the authors of:
 - [Motion-Agent](https://github.com/modelscope/motionagent)
 - [text-to-motion](https://github.com/EricGuo5513/text-to-motion)
 
-MotionScript: Z. Wu et al., *MotionScript: Visual Specification of Human Motion Synthesis*, ACM SIGGRAPH Asia 2023.
+
