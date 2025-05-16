@@ -80,7 +80,7 @@ Use `SFU_salsa_dance.py` to build a fast LMDB for training:
 ```bash
 python SFU_salsa_dance.py   --salsa_data_root /path/to/CoMPAS3D   --output_lmdb ./data/salsa.lmdb
 ```
-
+You may also use our provided processed data.
 ### 3. Create Training Samples
 `Salsa_dataloader.py` reads the LMDB and yields minibatches:
 ```bash
@@ -107,7 +107,7 @@ python Train_motionllm_sals.py   --task finetune   --pretrained_ckpt ./checkpoin
 
 ## Demo & Inference
 
-Before running the demo, ensure your pretrained models (e.g. checkpoint files, VQ-VAE, GloVe, evaluator, etc.) are placed in a folder (e.g. `./checkpoints`) and point to it via `--model_ckpt`.
+Before running the demo, ensure your pretrained models (e.g. checkpoint files, VQ-VAE, GloVe, evaluator, and our fine-tuned for different tasks) are placed in a folder (e.g. `./checkpoints`) and point to it via `--model_ckpt`.
 
 Run the interactive demo to load a model and perform inference for one of the multitask SalsaAgent capabilities.
 
@@ -116,45 +116,6 @@ python demo.py   --model_ckpt ./checkpoints/finetune/leader_to_follower.pt   --t
 ```
 
 If you omit `--task`, the script will prompt you to choose:
-
-```python
-if __name__ == "__main__":
-    from demo_argparse import ArgumentParser
-    parser = ArgumentParser(description="Run demo with a task name")
-    parser.add_argument(
-        '--task', type=str,
-        choices=[
-            "baseline",           # basic motion-only demo
-            "follower_to_leader", # generate leader motion from follower input
-            "leader_to_follower", # generate follower motion from leader input
-            "caption_to_motion"   # generate motion from a text caption
-        ],
-        help="Name of the task to run"
-    )
-    args = parser.parse_args()
-
-    if args.task is None:
-        print("Please choose a task:")
-        print("1. baseline")
-        print("2. follower_to_leader")
-        print("3. leader_to_follower")
-        print("4. caption_to_motion")
-        choice = input("Enter the task name or number: ").strip()
-        task_map = {
-            "1": "baseline",
-            "2": "follower_to_leader",
-            "3": "leader_to_follower",
-            "4": "caption_to_motion"
-        }
-        task_name = task_map.get(choice, choice if choice in task_map.values() else None)
-        if task_name is None:
-            print("Invalid choice. Exiting.")
-            exit(1)
-    else:
-        task_name = args.task
-
-    print(f"Running task: {task_name}")
-```
 
 Supported tasks:
 
