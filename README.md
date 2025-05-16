@@ -1,69 +1,183 @@
-# Salsa as a Nonverbal Embodied Language–The CoMPAS3D Dataset and Benchmarks 
+## Salsa as a Nonverbal Embodied Language–The CoMPAS3D Dataset and Benchmarks
 
-## Overview
+### Overview
+Imagine a humanoid that can safely and creatively dance with a human, adapting to its partner’s proficiency, using haptic signaling as a primary form of communication. While today’s AI systems excel at text or voice-based interaction with large language models, human communication extends far beyond words—it includes embodied movement, timing, and physical coordination. Modeling coupled interaction between two agents poses a formidable challenge: it is continuous, bidirectionally reactive, and shaped by individual variation.
 
-Imagine a humanoid that can safely and creatively dance with a human, adapting to its partner's proficiency, using haptic signaling as a primary form of communication. While today's AI systems excel at text or voice-based interaction with large language models, human communication extends far beyond text—it includes embodied movement, timing, and physical coordination. Modeling coupled interaction between two agents poses a formidable challenge: it is continuous, bidirectionally reactive, and shaped by individual variation. We present CoMPAS3D, the largest and most diverse motion capture dataset of improvised salsa dancing, designed as a challenging testbed for interactive, expressive humanoid AI. The dataset includes 3 hours of leader-follower salsa dances performed by 18 dancers spanning beginner, intermediate, and professional skill levels. For the first time, we provide fine-grained salsa expert annotations, covering over 2,800 move segments, including move types, combinations, execution errors and stylistic elements. Salsa’s formal judging standards offer evaluation criteria that are uncommon in other expressive interactions, making it particularly suitable for benchmarking embodied social AI. We draw analogies between partner dance communication and natural language, defining two benchmark tasks for synthetic 3D humans that parallel key problems in spoken language and dialogue processing: leader or follower generation with proficiency levels (speaker or listener synthesis), and duet (conversation) generation. Towards a long-term goal of partner dance with humans, we release the dataset, annotations, and code, along with a multitask SalsaAgent model capable of performing all benchmark tasks, alongside additional baselines to encourage research in socially interactive embodied AI and creative, expressive humanoid motion generation.
+We present **CoMPAS3D**, the largest and most diverse motion-capture dataset of improvised salsa dancing, designed as a challenging testbed for interactive, expressive humanoid AI. The dataset includes:
+- **3 hours** of leader–follower salsa dances
+- **18 dancers** spanning beginner, intermediate, and professional skill levels
+- **2,800+ move segments** annotated with move types, combinations, errors, and stylistic elements
 
+We draw analogies between partner dance communication and natural language, defining two benchmark tasks for synthetic 3D humans that parallel key problems in spoken dialogue: speaker/listener synthesis (leader/follower generation) and duet (conversation) generation.
 
+Alongside the dataset and expert annotations, we release:
+1. A multitask **SalsaAgent** model capable of:
+   - **Leader→Follower** and **Follower→Leader** motions
+   - **Caption→Motion** generation
+2. **Baselines** and **evaluation scripts** to accelerate research in socially interactive embodied AI.
+
+---
 
 ## Getting Started
 
-### Environment Setup
+### 1. Environment Setup
 ```bash
 conda create -n motionagent python=3.10
 conda activate motionagent
 pip install -r requirements.txt
 ```
-### Download Salsa-Agent ckpts
-Download Salsa-Agent ckpts.
+
+### 2. Download Pretrained Checkpoints & Assets
+We provide helper scripts to fetch all required weights and models:
 ```bash
-bash prepare/download_ckpt.sh
-```
-### Download Glove and extractor
-Download evaluation models and gloves for evaluation.
-```bash
-bash prepare/download_glove.sh
-bash prepare/download_extractor.sh
+bash prepare/download_ckpt.sh      # SalsaAgent checkpoints
+bash prepare/download_vqvae.sh     # VQ-VAE model
+bash prepare/download_glove.sh     # GloVe embeddings
+bash prepare/download_extractor.sh # Evaluation extractor models
 ```
 
-### Prepare the LLM backbone
-We use Google Gemma2-2B as MotionLLM's backbone. Please grant access from [huggingface](https://huggingface.co/google/gemma-2-2b) and use `huggingface-cli login` to login.
+### 3. Prepare Body Models & Auxiliary Data
+1. **SMPL-X**: Download from [SMPL-X Website](https://smpl-x.is.tue.mpg.de/) and place in:
+   ```
+   ./body_model/smplx
+   ```
+2. **SMPL-H AMASS**: Download the AMASS SMPL-H dataset and place in:
+   ```
+   ./utils/salsa_utils/lib/MotionScript/data/smplh_amass
+   ```
+3. **MotionScript**: We use MotionScript for data augmentation during pretraining [@motionscript]. Ensure the `data` folder contains the SMPL-H files above.
 
-## Demo
-We provide demo for Salsa-Agent that uses our test set. You will need to download the data and preprocess them or you could easily download preprocessed data.
-To start the demo:
+### 4. Install WaveTokenizer
+The salsa demo uses a WaveTokenizer for audio tokenization at 40 tokens/sec:
+1. Clone & install per instructions:
+   ```bash
+   git clone https://github.com/YourOrg/WaveTokenizer.git utils/salsa_utils/lib/wavetokenizer
+   cd utils/salsa_utils/lib/wavetokenizer
+   python setup.py install
+   ```
+2. Add to Python path (e.g., in `~/.bashrc`):
+   ```bash
+   export PYTHONPATH="$PYTHONPATH:$(pwd)/utils/salsa_utils/lib/wavetokenizer"
+   ```
 
+---
+
+## Data Preparation
+
+### 1. Download Raw Dataset
+Download the CoMPAS3D raw data, which includes:
+- **SMPL-X extreme body models**
+- **`synced_animation/`** folder with paired motion and audio (pre-synchronized)
+
+Place under:
 ```bash
-python demo.py
+--salsa_data_root /path/to/CoMPAS3D
+``` 
+
+### 2. Generate LMDB
+Use `SFU_salsa_dance.py` to build a fast LMDB for training:
+```bash
+python SFU_salsa_dance.py   --salsa_data_root /path/to/CoMPAS3D   --output_lmdb ./data/salsa.lmdb
 ```
 
-### Example Prompts
-Here are some examples of what you can do with Salsa-Agent:
-
-1. **Solo Dance generation**
+### 3. Create Training Samples
+`Salsa_dataloader.py` reads the LMDB and yields minibatches:
 ```bash
-python demo.py -- caption_to_motion
+python -c "from Salsa_dataloader import SalsaDataset; ds = SalsaDataset(lmdb_path='./data/salsa.lmdb')"
 ```
 
-2. **Duet Dance Generation**
+---
+
+## Training
+
+### Pretraining (None Task)
+Run the general MotionLLM pretraining with:
 ```bash
-python demo.py -- leader_to_follower
-python demo.py -- follower_to_leader
+python Train_motionllm_sals.py   --task none   --data_root ./data/salsa.lmdb   --save_dir ./checkpoints/pretrain
 ```
-<details>
-<summary>Preview of the example motion</summary>
 
+### Fine-tuning
+Resume from the pretraining checkpoint:
+```bash
+python Train_motionllm_sals.py   --task finetune   --pretrained_ckpt ./checkpoints/pretrain/latest.pt   --data_root ./data/salsa.lmdb   --save_dir ./checkpoints/finetune
+```
 
-## Evaluation
-Please refer to ```metrics``` folder for the evaluation details.
+---
 
+## Demo & Inference
 
-## Acknowledgements
-We would like to thank the following open-source projects for their contributions to our codes:
-[T2M-GPT](https://github.com/Mael-zys/T2M-GPT),
-[NExT-GPT](https://github.com/NExT-GPT/NExT-GPT),
-[Motion-Agent](https://github.com/modelscope/motionagent),
-[text-to-motion](https://github.com/EricGuo5513/text-to-motion).
+Before running the demo, ensure your pretrained models (e.g. checkpoint files, VQ-VAE, GloVe, evaluator, etc.) are placed in a folder (e.g. `./checkpoints`) and point to it via `--model_ckpt`.
 
+Run the interactive demo to load a model and perform inference for one of the multitask SalsaAgent capabilities.
 
+```bash
+python demo.py   --model_ckpt ./checkpoints/finetune/leader_to_follower.pt   --task follower_to_leader
+```
 
+If you omit `--task`, the script will prompt you to choose:
+
+```python
+if __name__ == "__main__":
+    from demo_argparse import ArgumentParser
+    parser = ArgumentParser(description="Run demo with a task name")
+    parser.add_argument(
+        '--task', type=str,
+        choices=[
+            "baseline",           # basic motion-only demo
+            "follower_to_leader", # generate leader motion from follower input
+            "leader_to_follower", # generate follower motion from leader input
+            "caption_to_motion"   # generate motion from a text caption
+        ],
+        help="Name of the task to run"
+    )
+    args = parser.parse_args()
+
+    if args.task is None:
+        print("Please choose a task:")
+        print("1. baseline")
+        print("2. follower_to_leader")
+        print("3. leader_to_follower")
+        print("4. caption_to_motion")
+        choice = input("Enter the task name or number: ").strip()
+        task_map = {
+            "1": "baseline",
+            "2": "follower_to_leader",
+            "3": "leader_to_follower",
+            "4": "caption_to_motion"
+        }
+        task_name = task_map.get(choice, choice if choice in task_map.values() else None)
+        if task_name is None:
+            print("Invalid choice. Exiting.")
+            exit(1)
+    else:
+        task_name = args.task
+
+    print(f"Running task: {task_name}")
+```
+
+Supported tasks:
+
+- `baseline`
+- `follower_to_leader`
+- `leader_to_follower`
+- `caption_to_motion`
+
+Example without manual prompt:
+
+```bash
+python demo.py --model_ckpt ./checkpoints/finetune/caption_to_motion.pt                --task caption_to_motion
+```
+
+---
+
+## Citation & Acknowledgements
+Please cite our work as:
+> **Salsa as a Nonverbal Embodied Language–The CoMPAS3D Dataset and Benchmarks**
+
+We thank the authors of:
+- [T2M-GPT](https://github.com/Mael-zys/T2M-GPT)
+- [NExT-GPT](https://github.com/NExT-GPT/NExT-GPT)
+- [Motion-Agent](https://github.com/modelscope/motionagent)
+- [text-to-motion](https://github.com/EricGuo5513/text-to-motion)
+
+MotionScript: Z. Wu et al., *MotionScript: Visual Specification of Human Motion Synthesis*, ACM SIGGRAPH Asia 2023.
