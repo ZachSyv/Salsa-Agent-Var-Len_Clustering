@@ -102,7 +102,7 @@ def main():
     # You should implement this dataset to match your caption-motion pair format -- Done!
 
     train_dataset = Salsa_Dataset(args,
-                    lmdb_dir='utils/salsa_utils/Salsa_Temp/lmdb_Salsa_pair/lmdb_train',
+                    lmdb_dir='dataset_processed/lmdb_Salsa_pair/lmdb_train',
                     n_poses=100,
                     subdivision_stride=50,
                     pose_resampling_fps=20)
@@ -115,5 +115,5 @@ def main():
 
 
 if __name__ == '__main__':
-    os.chdir('S:\Payam\Dance_Salsa_SFU\Motion-Agent-Salsa')
+    # os.chdir('S:\Payam\Dance_Salsa_SFU\Motion-Agent-Salsa')  # Windows-specific path, commented for Ubuntu compatibility
     main()

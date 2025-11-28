@@ -30,12 +30,13 @@ face_joint_indx = [2, 1, 17, 16]
 r_hip, l_hip = 2, 1
 joints_num = 22
 
-example_id, data_dir = "000021", r'M:\Payam_Projects\T2M-GPT\HumanML3D\joints'
 # Get offsets of target skeleton
-example_data = np.load(os.path.join(data_dir, example_id + '.npy'))
+tgt_skel = Skeleton(n_raw_offsets, kinematic_chain, 'cpu')
+example_id, data_dir = "000021", "body_model/HML3D_Example_joonts"
+example_file = os.path.join(data_dir, example_id + '.npy')
+example_data = np.load(example_file)
 example_data = example_data.reshape(len(example_data), -1, 3)
 example_data = torch.from_numpy(example_data)
-tgt_skel = Skeleton(n_raw_offsets, kinematic_chain, 'cpu')
 # (joints_num, 3)
 tgt_offsets = tgt_skel.get_offsets_joints(example_data[0])
 print(f'tgt_offsets: {tgt_offsets.shape}, {tgt_offsets}')

@@ -12,6 +12,12 @@ import argparse as demo_argparse
 import os
 import sys
 
+# Add WavTokenizer to path (needed for decoder imports)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+wavtokenizer_path = os.path.join(current_dir, 'utils', 'salsa_utils', 'libs', 'WavTokenizer')
+if os.path.exists(wavtokenizer_path) and wavtokenizer_path not in sys.path:
+    sys.path.insert(0, wavtokenizer_path)
+
 # If working on windows use the following:
 # Path to the FFmpeg bin directory
 ffmpeg_path = r'S:\Payam\LAMMA\ffmpeg-master-latest-win64-gpl-shared\ffmpeg-master-latest-win64-gpl-shared\bin'
@@ -28,8 +34,8 @@ if ffmpeg_path not in os.environ['PATH']:
 from utils.salsa_utils.salsa_dataloader import Salsa_Dataset
 from utils.salsa_utils.salsa_dataloader import SALSA_CAPTIONS
 import pickle
-os.chdir('Motion-Agent-Salsa') # to refine the data loader felan.
-from utils.salsa_utils.libs.MotionScript.ms_utils_visu import render_HQ_Salsa, render_HQ_Salsa_pair
+# os.chdir('Motion-Agent-Salsa') # to refine the data loader felan. - Commented out for Ubuntu compatibility
+# from utils.salsa_utils.libs.MotionScript.ms_utils_visu import render_HQ_Salsa, render_HQ_Salsa_pair  # Commented out for Ubuntu compatibility
 
 
 
@@ -39,7 +45,9 @@ def motionllm_evaluation_qualitative_pairs(task):
 
     args = get_args_parser()
     args.save_dir = "./demo/"
-    args.device = 'cuda:0'
+    args.device = 'cpu'  # Changed from 'cuda:0' to 'cpu' for Ubuntu compatibility
+    # args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
     if task == 'baseline':
         args.is_baseline = True
@@ -50,23 +58,23 @@ def motionllm_evaluation_qualitative_pairs(task):
     # Baseline
     if task == 'baseline':
 
-        model.load_model('ckpt/motionllm.pth')
+        model.load_model('ckpt/motionllm.pth')  # This one exists
         current_batch_task = 'caption_to_motion'
     elif task == 'solo':
-        model.load_model('ckpt/captioning_to_motion_V3/salsa_agent.pth')
+        model.load_model('checkpoints/Xmotionllm_epoch100.pth')  # Updated path for Ubuntu compatibility
         current_batch_task = 'caption_to_motion'
     elif task == "leader_to_follower":
-        model.load_model('ckpt/leader_to_follower_V3/salsa_agent.pth')
+        model.load_model('checkpoints/Xmotionllm_epoch42.pth')  # Updated path for Ubuntu compatibility
         current_batch_task = 'leader_to_follower'
     elif task == 'follower_to_leader':
-        model.load_model('ckpt/follower_to_leader_V3/salsa_agent.pth')
+        model.load_model('checkpoints/Xmotionllm_epoch14.pth')  # Updated path for Ubuntu compatibility
         current_batch_task = 'follower_to_leader'
 
 
 
 
     model.llm.eval()
-    model.llm.cuda()
+    model.llm.to(args.device)  # Changed from .cuda() to .to(args.device) for Ubuntu compatibility
 
     motion_tokens_to_generate = []
     follower_motion_tokens = []
@@ -256,12 +264,14 @@ def motionllm_evaluation_qualitative_pairs(task):
 
 
 
-def load_data_pair(style='beginner', pair="Pair1", take='take1_1', start_sec=0, end_sec=5):
+def load_data_pair(style='beginner', pair="Pair1", take='take1_1', start_sec=0, end_sec=5, split='train'):
     args = get_args_parser()
     # args.is_MDM = True # to get HumanML3D outputs
     args.is_MDM = True
+    # Use new processed dataset path
+    lmdb_path = f'dataset_processed_New/lmdb_Salsa_pair/lmdb_{split}'
     train_dataset = Salsa_Dataset(args,
-                    lmdb_dir='dataset_processed/lmdb_Salsa_pair/lmdb_train',
+                    lmdb_dir=lmdb_path,
                     n_poses=100,
                     subdivision_stride=50,
                     pose_resampling_fps=20)
@@ -305,7 +315,9 @@ def load_data_pair(style='beginner', pair="Pair1", take='take1_1', start_sec=0, 
 
 
 
-    items = [train_dataset.__getitem__(index) for index in list_of_indecis]
+    # items = [train_dataset.__getitem__(index) for index in list_of_indecis]
+    # I am doing a work around since I am debugging, I will back and remove the following line later.
+    items = [train_dataset.__getitem__(index) for index in range(len(train_dataset))][:2]
     return items
 
 if __name__ == "__main__":
@@ -315,6 +327,18 @@ if __name__ == "__main__":
         type=str,
         choices=["follower_to_leader", "leader_to_follower", "caption_to_motion"],
         help="Name of the task"
+    )
+    demo_parser.add_argument(
+        '--split',
+        type=str,
+        choices=["train", "val", "test"],
+        default="train",
+        help="Dataset split to use (default: train)"
+    )
+    demo_parser.add_argument(
+        '--create_cache_only',
+        action='store_true',
+        help="Only create cache for the dataset without running inference"
     )
     demo_args = demo_parser.parse_args()
 
@@ -341,12 +365,27 @@ if __name__ == "__main__":
     else:
         task_name = demo_args.task
 
-    print(f"Running task: {task_name}")
+    if demo_args.create_cache_only:
+        # Just create cache without running inference
+        print(f"Creating cache for split: {demo_args.split}")
+        args = get_args_parser()
+        args.is_MDM = True
+        lmdb_path = f'dataset_processed_New/lmdb_Salsa_pair/lmdb_{demo_args.split}'
+        print(f"Loading dataset from: {lmdb_path}")
+        dataset = Salsa_Dataset(args,
+                        lmdb_dir=lmdb_path,
+                        n_poses=100,
+                        subdivision_stride=50,
+                        pose_resampling_fps=20)
+        print(f"Cache created! Dataset has {len(dataset)} samples.")
+        print(f"Cache location: {lmdb_path}_cache_MDM")
+    else:
+        print(f"Running task: {task_name}")
 
-    # motion_agent_demo()
+        # motion_agent_demo()
 
 
-    # motionllm_evaluation_qualitative()
+        # motionllm_evaluation_qualitative()
 
-    motionllm_evaluation_qualitative_pairs(task_name)
+        motionllm_evaluation_qualitative_pairs(task_name)
 

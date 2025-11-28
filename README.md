@@ -25,6 +25,55 @@ Alongside the dataset and expert annotations, we release:
 conda create -n motionagent python=3.10
 conda activate motionagent
 pip install -r requirements.txt
+
+# Note: If you encounter missing dependencies, you may need to install them manually:
+# pip install lmdb human_body_prior roma body_visualizer
+
+# Note: body_visualizer requires a display for visualization. If running on a headless server,
+# you may need to set up X11 forwarding or use a virtual display.
+
+## Current Setup Status
+✅ Environment created and activated  
+✅ Requirements installed  
+✅ Pretrained checkpoints downloaded  
+✅ WavTokenizer dependencies installed  
+✅ human_body_prior installed  
+✅ roma installed  
+✅ body_visualizer installed locally  
+✅ Model loading successful (past import and checkpoint issues)
+✅ LMDB training data moved to correct location
+✅ Fixed Windows-specific paths and arguments for Ubuntu
+✅ WavTokenizer checkpoint downloaded (1.76GB)
+⚠️ CUDA out of memory error (model requires >10.75GB GPU memory)
+⚠️ Display/OpenGL context issues on headless server (common issue)
+
+## Download WavTokenizer Checkpoint
+The demo requires a WavTokenizer checkpoint file that is not included in the repository:
+- **Required file**: `utils/salsa_utils/libs/WavTokenizer/results/train/wavtokenizer_large_unify_600_24k.ckpt`
+- **Download command**:
+  ```bash
+  mkdir -p utils/salsa_utils/libs/WavTokenizer/results/train
+  python -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='novateur/WavTokenizer-large-unify-40token', filename='wavtokenizer_large_unify_600_24k.ckpt', local_dir='utils/salsa_utils/libs/WavTokenizer/results/train')"
+  ```
+- **Source**: [Hugging Face - WavTokenizer-large-unify-40token](https://huggingface.co/novateur/WavTokenizer-large-unify-40token/tree/main)
+
+## Troubleshooting Display Issues
+If you encounter OpenGL/display errors on a headless server:
+1. Use X11 forwarding: `ssh -X username@server`
+2. Set up virtual display: `export DISPLAY=:99 && Xvfb :99 -screen 0 1024x768x24 &`
+3. Install Mesa software rendering: `sudo apt-get install mesa-utils`
+
+## GPU Memory Requirements
+The SalsaAgent model requires significant GPU memory:
+- **Minimum**: 12GB GPU memory
+- **Recommended**: 16GB+ GPU memory
+- **Current issue**: CUDA out of memory (model needs >10.75GB)
+
+### Solutions for GPU Memory Issues:
+1. **Use CPU instead**: Set `--device cpu` (slower but no memory limits)
+2. **Reduce batch size**: Modify batch size in options
+3. **Use smaller model**: Switch to a smaller LLM backbone
+4. **Gradient checkpointing**: Enable memory-efficient training
 ```
 
 ### 2. Download Pretrained Checkpoints & Assets
@@ -49,16 +98,15 @@ bash prepare/download_extractor.sh # Evaluation extractor models
 
 ### 4. Install WaveTokenizer
 We use a WaveTokenizer for audio tokenization at 40 tokens/sec:
-1. Clone & install per instructions:
-2. Follow the instruction provided here: [https://github.com/jishengpeng/WavTokenizer/tree/main](https://github.com/jishengpeng/WavTokenizer/tree/main)
+1. The WavTokenizer is already included in the repository under `utils/salsa_utils/libs/WavTokenizer/`
+2. Install its dependencies:
    ```bash
-   git clone https://github.com/YourOrg/WaveTokenizer.git utils/salsa_utils/lib/wavetokenizer
-   cd utils/salsa_utils/lib/wavetokenizer
-   python setup.py install
+   cd utils/salsa_utils/libs/WavTokenizer
+   pip install -r requirements.txt
    ```
 3. Add to Python path (e.g., in `~/.bashrc`):
    ```bash
-   export PYTHONPATH="$PYTHONPATH:$(pwd)/utils/salsa_utils/lib/wavetokenizer"
+   export PYTHONPATH="$PYTHONPATH:$(pwd)/utils/salsa_utils/libs/WavTokenizer"
    ```
 
 ---
@@ -76,10 +124,27 @@ Place under:
 ``` 
 
 ### 2. Generate LMDB
-Use `SFU_salsa_dance.py` to build a fast LMDB for training:
-```bash
-python SFU_salsa_dance.py   --salsa_data_root /path/to/CoMPAS3D   --output_lmdb ./data/salsa.lmdb
+Use `utils.salsa_utils.salsa_utils.read_all_salsa_pairs` to build a fast LMDB for training. This function processes the raw dataset and creates the LMDB structure:
+
+**Important: HumanML3D Example File Required**
+Before processing, you need to place an example file from HumanML3D processed `new_joints` folder to compute correct skeleton offsets:
+- **Source**: Get `000021.npy` from HumanML3D processed `new_joints` folder
+- **Destination**: Place it at `body_model/HML3D_Example_joonts/000021.npy`
+- **Purpose**: This file is used to compute target skeleton offsets (`tgt_offsets`) for proper motion processing. Without it, the processing may produce NaN values in HML3D vectors.
+
+```python
+from utils.salsa_utils.salsa_utils import read_all_salsa_pairs
+
+# Dataset location
+salsa_data_root = "/localhome/pjomeyaz/Payam_Files/Projects/Salsa_Dance/Dataset"
+save_path = "./dataset_processed"  # Output directory
+
+# Generate LMDB
+read_all_salsa_pairs(salsa_data_root, save_path)
 ```
+
+This will create the LMDB files in `./dataset_processed/lmdb_Salsa_pair/lmdb_train` and `lmdb_test`.
+
 You may also use our provided processed data.
 ### 3. Create Training Samples
 `Salsa_dataloader.py` reads the LMDB and yields minibatches:

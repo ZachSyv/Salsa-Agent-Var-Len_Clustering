@@ -174,3 +174,9 @@ xxhash==3.4.1
 yacs==0.1.8
 yarl==1.9.4
 zipp==3.17.0
+
+# Additional dependencies discovered during setup
+lmdb==1.7.3
+human_body_prior==0.8.5.0
+roma==1.5.4
+body_visualizer==1.1.0

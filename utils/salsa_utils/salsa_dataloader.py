@@ -87,6 +87,7 @@ class Motion_tokenizer:
             self.mean = np.load(os.path.join(args.parent_dir, 'checkpoints/t2m/VQVAEV3_CB1024_CMT_H1024_NRES3/meta/mean.npy'))
             self.std = np.load(os.path.join(args.parent_dir, 'checkpoints/t2m/VQVAEV3_CB1024_CMT_H1024_NRES3/meta/std.npy'))
         print('Loading the HumanVQVAE model is completed!')
+        
     def denormalize(self, motion):
         return self.mean + motion * self.std
 
@@ -160,7 +161,7 @@ class Audio_tokenizer:
         return wav, 24000
 
 # from MotionScript.captioning_motion_Salsa import MotionScript_Forward_Salsa
-import utils.salsa_utils.libs.MotionScript.captioning_motion_Salsa as MS_Salsa
+# import utils.salsa_utils.libs.MotionScript.captioning_motion_Salsa as MS_Salsa  # Commented out for Ubuntu compatibility
 # class MotionScript:
 #
 #     def __init__(self, args):
@@ -250,14 +251,14 @@ class DataPreprocessor:
         cursor = src_txn.cursor()
         counter = 0
         for key, value in tqdm(cursor):
-            print("video ", counter, "of", total_count, '\n')
+            print("\n\nvideo ", counter, "of", total_count, '\n\n')
             video = pyarrow.deserialize(value)
             vid = video['vid']
             clips = video['clips']
             for clip_idx, clip in enumerate(clips):
                 self._sample_from_clip(vid, clip)
                 counter = counter + 1
-            # if counter > 2: break
+            if counter > 2: break
 
         # print number of samples
         with self.dst_lmdb_env.begin() as txn:
@@ -719,6 +720,8 @@ class DataPreprocessor:
             sample_audio = clip_audio_raw[:, audio_start:audio_end]
             sample_audiotokens = self.audio_tokenizer.tokenize(sample_audio)
             sample_audiotokens = sample_audiotokens.squeeze().cpu().numpy()
+            # Save raw audio as numpy array (convert from torch tensor if needed)
+            sample_audio_raw = sample_audio.cpu().numpy() if isinstance(sample_audio, torch.Tensor) else sample_audio
             # mel_chunks = []
             # raw_chunks = []
             # for audio_sub in range(self.audio_sample_length//self.audio_sampling_rate):
@@ -800,6 +803,7 @@ class DataPreprocessor:
             sample_ms_description_list_F.append(sample_bin_ms_F)
 
             sample_audio_tokens_list.append(sample_audiotokens)
+            sample_audio_raw_list.append(sample_audio_raw)
 
 
             # sample_words_list.append(sample_words)
@@ -818,12 +822,12 @@ class DataPreprocessor:
                         poses_rotmat_L, poses_rotmat_F, \
                         ms_description_L, ms_description_F, \
                         poses_vq_tokens_L, poses_vq_tokens_F, \
-                         audio_tokens, aux in \
+                         audio_tokens, audio_raw, aux in \
                             zip(sample_skeleton3d_list_L, sample_skeleton3d_list_F,
                                 sample_rotmat_list_L, sample_rotmat_list_F,
                                 sample_ms_description_list_L, sample_ms_description_list_F,
                                 sample_vqtokens_list_L, sample_vqtokens_list_F,
-                                sample_audio_tokens_list, aux_info):
+                                sample_audio_tokens_list, sample_audio_raw_list, aux_info):
 
                         poses_keypoints3d_L = np.asarray(poses_keypoints3d_L)
                         poses_rotmat_L = np.asarray(poses_rotmat_L)
@@ -834,12 +838,13 @@ class DataPreprocessor:
                         poses_vqtokens_F = np.asarray(poses_vq_tokens_F)
 
                         audio_tokens = np.asarray(audio_tokens)
+                        audio_raw = np.asarray(audio_raw)
                         # GPT_3_Embedding = np.array(GPT_3_Embedding)
                         # save
                         k = '{:010}'.format(self.n_out_samples).encode('ascii')
                         v = [poses_keypoints3d_L, poses_rotmat_L, ms_description_L, poses_vqtokens_L,
                              poses_keypoints3d_F, poses_rotmat_F, ms_description_F, poses_vqtokens_F,
-                             audio_tokens, aux]
+                             audio_tokens, audio_raw, aux]
                         # v = [words, poses, audio_raws, audio_mels, aux, sentence_leve_latents, GPT_3_Embedding]
                         v = pyarrow.serialize(v).to_buffer()
                         txn.put(k, v)
@@ -850,13 +855,13 @@ class DataPreprocessor:
                             HML3D_vec_L, HML3D_vec_F, \
                             ms_description_L, ms_description_F, \
                             poses_vq_tokens_L, poses_vq_tokens_F, \
-                            audio_tokens, aux in \
+                            audio_tokens, audio_raw, aux in \
                             zip(sample_skeleton3d_list_L, sample_skeleton3d_list_F,
                                 sample_rotmat_list_L, sample_rotmat_list_F,
                                 sample_HML3D_vec_list_L, sample_HML3D_vec_list_F,
                                 sample_ms_description_list_L, sample_ms_description_list_F,
                                 sample_vqtokens_list_L, sample_vqtokens_list_F,
-                                sample_audio_tokens_list, aux_info):
+                                sample_audio_tokens_list, sample_audio_raw_list, aux_info):
                         poses_keypoints3d_L = np.asarray(poses_keypoints3d_L)
                         poses_rotmat_L = np.asarray(poses_rotmat_L)
                         HML3D_vec_L = np.asarray(HML3D_vec_L)
@@ -868,12 +873,13 @@ class DataPreprocessor:
                         poses_vqtokens_F = np.asarray(poses_vq_tokens_F)
 
                         audio_tokens = np.asarray(audio_tokens)
+                        audio_raw = np.asarray(audio_raw)
                         # GPT_3_Embedding = np.array(GPT_3_Embedding)
                         # save
                         k = '{:010}'.format(self.n_out_samples).encode('ascii')
                         v = [poses_keypoints3d_L, poses_rotmat_L, HML3D_vec_L, ms_description_L, poses_vqtokens_L,
                              poses_keypoints3d_F, poses_rotmat_F, HML3D_vec_F, ms_description_F, poses_vqtokens_F,
-                             audio_tokens, aux]
+                             audio_tokens, audio_raw, aux]
                         # v = [words, poses, audio_raws, audio_mels, aux, sentence_leve_latents, GPT_3_Embedding]
                         v = pyarrow.serialize(v).to_buffer()
                         txn.put(k, v)
@@ -1034,11 +1040,11 @@ class Salsa_Dataset(Dataset):
             if not self.args.is_MDM:
                 poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
                  poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
-                 audio_tokens, aux_info = sample
+                 audio_tokens, audio_raw, aux_info = sample
             if self.args.is_MDM:
                 poses_keypoints3d_L, poses_rotmat_L, HML3D_L, ms_desc_L, vq_tokens_L, \
                     poses_keypoints3d_F, poses_rotmat_F, HML3D_F, ms_des_F, vq_tokens_F, \
-                    audio_tokens, aux_info = sample
+                    audio_tokens, audio_raw, aux_info = sample
                 HML3D_L = torch.from_numpy(HML3D_L).to(self.args.device)
                 HML3D_F = torch.from_numpy(HML3D_F).to(self.args.device)
 

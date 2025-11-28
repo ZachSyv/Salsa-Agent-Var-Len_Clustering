@@ -7,6 +7,8 @@ def get_args_parser():
     
     ## device
     parser.add_argument('--device', type=str, default='cuda:0', help='device')
+    parser.add_argument('--is-baseline', action='store_true', help='whether to use baseline model architecture')
+    parser.add_argument('--is-MDM', action='store_true', help='whether to use MDM data format')
 
     ## LLM 
     parser.add_argument('--llm-backbone', type=str, default='google/gemma-2-2b-it', help='name of huggingface model backbone')
@@ -17,6 +19,7 @@ def get_args_parser():
     parser.add_argument('--lora-dropout', type=float, default=0.1, help='lora_dropout')
 
     ## dataloader  
+    parser.add_argument('--parent-dir', type=str, default='.', help='parent directory for data and checkpoints')
     parser.add_argument('--dataname', type=str, default='kit', help='dataset directory')
     parser.add_argument('--batch-size', default=128, type=int, help='batch size')
     parser.add_argument('--window-size', type=int, default=64, help='training motion length')

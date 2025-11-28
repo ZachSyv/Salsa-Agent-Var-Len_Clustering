@@ -182,4 +182,5 @@ wandb/
 *.mc
 *.pt
 *.pk
-*.pkl
+*.pklutils/salsa_utils/libs/MotionScript/data/smplh.tar.xz
+*.tar.xz
