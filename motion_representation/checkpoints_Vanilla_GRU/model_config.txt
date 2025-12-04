@@ -1,0 +1,42 @@
+================================================================================
+Motion Model Configuration
+================================================================================
+
+Model Architecture:
+  Encoder Type: gru
+  Decoder Type: gru
+  Use VAE: False
+
+Model Parameters:
+  Input Dimension: 263
+  Hidden Dimension: 512
+  Number of Layers: 2
+  Latent Dimension: 512
+  Sequence Length: 20
+  Dropout: 0.1
+
+Training Parameters:
+  Batch Size: 32
+  Gradient Accumulation Steps: 1
+  Learning Rate: 0.0001
+  Weight Decay: 1e-05
+  Number of Epochs: 100
+  Use AMP: True
+  LR Scheduler: None
+  Reconstruction Weight: 1.0
+  KL Weight: 0.0001
+
+Data Parameters:
+  LMDB Directory: dataset_processed_New/lmdb_Salsa_pair/lmdb_train
+  Window Size: 20
+  Stride: 10
+  Use Both Roles: True
+  Is MDM Format: True
+
+Checkpoint Parameters:
+  Checkpoint Directory: motion_representation/checkpoints_Vanilla_GRU
+  Model Name: Vanilla_GRU
+  Save Every: 1 epochs
+  Log Every: 100 iterations
+
+================================================================================

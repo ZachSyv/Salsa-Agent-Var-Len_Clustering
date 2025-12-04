@@ -686,10 +686,13 @@ def read_all_salsa_pairs(salsa_data_root, save_path):
         'Pair8': {'val': None, 'test': 'Song4_Take2'},
         'Pair9': {'val': None, 'test': 'Song1_Take1'},
     }
+    
+    # Track samples by split for summary report
+    split_samples = {'train': [], 'val': [], 'test': []}
 
     for folder in os.listdir(smpl_root):
-        if v_i > 1:
-            break
+        # if v_i > 1:
+        #     break
         if not folder.startswith('Pair'):
             continue
         
@@ -754,12 +757,12 @@ def read_all_salsa_pairs(salsa_data_root, save_path):
                 else:
                     dataset_idx = 0  # train
             else:
-                # Fallback to old logic if naming doesn't match
-                if v_i == 0:
-                    dataset_idx = 1  # validation
-                else:
-                    dataset_idx = 0  # train
-
+                # # Fallback to old logic if naming doesn't match
+                # if v_i == 0:
+                #     dataset_idx = 1  # validation
+                # else:
+                #     dataset_idx = 0  # train
+                v_i = None
             # Extract audio from mp4
             audio_path = mp4_file.path.replace('.mp4', '.wav')
             try:
@@ -883,7 +886,11 @@ def read_all_salsa_pairs(salsa_data_root, save_path):
 
             name = os.path.split(leader_file.name)[1][:-4] + ',' + \
                    os.path.split(follower_file.name)[1][:-4]
-            print(f"  Processing: {name} -> split: {['train', 'val', 'test'][dataset_idx]}")
+            split_name = ['train', 'val', 'test'][dataset_idx]
+            print(f"  Processing: {name} -> split: {split_name}")
+            
+            # Track sample for summary
+            split_samples[split_name].append(f"{folder}/{takes_folder}")
 
             # Load annotation if available
             annotation = None
@@ -943,13 +950,29 @@ def read_all_salsa_pairs(salsa_data_root, save_path):
                         txn.put(k, v)
 
             v_i += 1
-            if v_i > 1:
-                break
+            # if v_i > 1:
+            #     break
 
     # Close db
     for i in range(3):
         db[i].sync()
         db[i].close()
+    
+    # Print split summary
+    print("\n" + "=" * 80)
+    print("DATASET SPLIT SUMMARY")
+    print("=" * 80)
+    split_names = ['train', 'val', 'test']
+    split_labels = ['Training', 'Validation', 'Test']
+    for split, label in zip(split_names, split_labels):
+        count = len(split_samples[split])
+        print(f"\n[{label}] ({count} samples):")
+        if count > 0:
+            for sample in sorted(split_samples[split]):
+                print(f"  - {sample}")
+        else:
+            print("  (no samples)")
+    print("\n" + "=" * 80)
 
 
 def sanity_check_lmdb(save_path, show_example=True):

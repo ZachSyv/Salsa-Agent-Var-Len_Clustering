@@ -124,29 +124,48 @@ Place under:
 ``` 
 
 ### 2. Generate LMDB
-Use `utils.salsa_utils.salsa_utils.read_all_salsa_pairs` to build a fast LMDB for training. This function processes the raw dataset and creates the LMDB structure:
+Run the script directly to process the raw dataset and create LMDB files:
 
 **Important: HumanML3D Example File Required**
-Before processing, you need to place an example file from HumanML3D processed `new_joints` folder to compute correct skeleton offsets:
+To be consistent with common motion datasets such as HumanML3D, the preprocessing pipeline:
+1. Rotates keypoints **-90 degrees around X-axis** to align with HumanML3D coordinate system
+2. Uses an example file from HumanML3D to compute target skeleton offsets (`tgt_offsets`) during preprocessing for producing HumanML3D representation
+
+Before processing, you need to place an example file from HumanML3D processed `new_joints` folder:
 - **Source**: Get `000021.npy` from HumanML3D processed `new_joints` folder
 - **Destination**: Place it at `body_model/HML3D_Example_joonts/000021.npy`
 - **Purpose**: This file is used to compute target skeleton offsets (`tgt_offsets`) for proper motion processing. Without it, the processing may produce NaN values in HML3D vectors.
 
-```python
-from utils.salsa_utils.salsa_utils import read_all_salsa_pairs
-
-# Dataset location
-salsa_data_root = "/localhome/pjomeyaz/Payam_Files/Projects/Salsa_Dance/Dataset"
-save_path = "./dataset_processed"  # Output directory
-
-# Generate LMDB
-read_all_salsa_pairs(salsa_data_root, save_path)
+```bash
+python utils/salsa_utils/salsa_utils.py \
+    --salsa_data_root /local-scratch/localhome/pjomeyaz/Payam_Files/Projects/Salsa_Dance/Dataset/compas3d \
+    --save_path ./dataset_processed_New
 ```
 
-This will create the LMDB files in `./dataset_processed/lmdb_Salsa_pair/lmdb_train` and `lmdb_test`.
+This will create the LMDB files in `./dataset_processed_New/lmdb_Salsa_pair/lmdb_train` and `lmdb_test`.
+
+### 3. Create Cache
+After generating the LMDB, create a cached version for faster data loading:
+```bash
+python demo.py --create_cache_only --split train
+```
+This will create a cache at `./dataset_processed_New/lmdb_Salsa_pair/lmdb_train_cache_MDM`.
+
+### 4. Run Visualization App
+To visualize the dataset samples interactively:
+```bash
+python visualization/visualization_app.py
+```
+The app will launch on `http://0.0.0.0:7861` and allows you to:
+- Browse samples from the LMDB
+- Visualize leader and follower skeletons
+- View combined animations
+- Generate VQVAE reconstructions
+- Visualize audio tokenization
+- Experiment with relative motions
 
 You may also use our provided processed data.
-### 3. Create Training Samples
+### 5. Create Training Samples
 `Salsa_dataloader.py` reads the LMDB and yields minibatches:
 ```bash
 python -c "from Salsa_dataloader import SalsaDataset; ds = SalsaDataset(lmdb_path='./data/salsa.lmdb')"

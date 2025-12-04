@@ -793,6 +793,92 @@ class VisualizationApp:
             debug_msg += error_msg
             debug_print(error_msg)
             return None, None, None, None, None, None, debug_msg
+    
+    def visualize_relative_motion(self, idx: int) -> Tuple[Optional[str], Optional[str], str]:
+        """
+        Visualize relative motion: Leader-Follower and Follower-Leader.
+        
+        Args:
+            idx: Sample index
+            
+        Returns:
+            Tuple of (leader_minus_follower_path, follower_minus_leader_path, debug_msg)
+        """
+        debug_msg = ""
+        try:
+            if not self.loader:
+                return None, None, "Error: No LMDB loaded"
+            
+            # Get sample
+            sample = self.loader.get_sample(idx)
+            if not sample:
+                return None, None, f"Error: Could not load sample {idx}"
+            
+            debug_msg += f"Visualizing relative motion for sample {idx}...\n"
+            
+            # Get keypoints
+            leader_keypoints = sample.get('poses_keypoints3d_L')
+            follower_keypoints = sample.get('poses_keypoints3d_F')
+            
+            if leader_keypoints is None or follower_keypoints is None:
+                error_msg = "Keypoints not found in sample"
+                debug_msg += error_msg + "\n"
+                return None, None, debug_msg
+            
+            # Convert to numpy if needed
+            if isinstance(leader_keypoints, torch.Tensor):
+                leader_keypoints = leader_keypoints.detach().cpu().numpy()
+            if isinstance(follower_keypoints, torch.Tensor):
+                follower_keypoints = follower_keypoints.detach().cpu().numpy()
+            
+            # Ensure same shape for subtraction
+            min_frames = min(leader_keypoints.shape[0], follower_keypoints.shape[0])
+            leader_keypoints = leader_keypoints[:min_frames]
+            follower_keypoints = follower_keypoints[:min_frames]
+            
+            # Compute relative motions
+            leader_minus_follower = leader_keypoints - follower_keypoints
+            follower_minus_leader = follower_keypoints - leader_keypoints
+            
+            # Get video ID for titles
+            vid_id = sample.get('aux_info', {}).get('vid', f'sample_{idx}')
+            
+            # Render relative motions
+            debug_msg += "Rendering relative motions...\n"
+            leader_minus_follower_path = os.path.join(self.temp_dir, f"leader_minus_follower_{idx}.mp4")
+            follower_minus_leader_path = os.path.join(self.temp_dir, f"follower_minus_leader_{idx}.mp4")
+            
+            render_skeleton_from_keypoints(
+                leader_minus_follower,
+                leader_minus_follower_path,
+                title=f"Leader - Follower: {vid_id}",
+                fps=20,
+                figsize=(6, 6),
+                dpi=100
+            )
+            
+            render_skeleton_from_keypoints(
+                follower_minus_leader,
+                follower_minus_leader_path,
+                title=f"Follower - Leader: {vid_id}",
+                fps=20,
+                figsize=(6, 6),
+                dpi=100
+            )
+            
+            debug_msg += "Relative motion visualization complete!\n"
+            return (
+                leader_minus_follower_path if os.path.exists(leader_minus_follower_path) else None,
+                follower_minus_leader_path if os.path.exists(follower_minus_leader_path) else None,
+                debug_msg
+            )
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Error in visualize_relative_motion: {str(e)}\n{traceback.format_exc()}"
+            debug_msg += error_msg
+            debug_print(error_msg)
+            return None, None, debug_msg
 
 
 def create_interface():
@@ -898,6 +984,14 @@ def create_interface():
                 with gr.Row():
                     original_video = gr.Video(label="Original Video", scale=1, elem_classes="video-player")
                     combined_video = gr.Video(label="Combined: Dancing Together", scale=1, elem_classes="video-player")
+        
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### Experiment: Relative", elem_classes="h3")
+                relative_btn = gr.Button("Generate Relative Motion", variant="primary")
+                with gr.Row():
+                    leader_minus_follower_video = gr.Video(label="Leader - Follower", scale=1, elem_classes="video-player")
+                    follower_minus_leader_video = gr.Video(label="Follower - Leader", scale=1, elem_classes="video-player")
         
         with gr.Row():
             with gr.Column():
@@ -1074,6 +1168,21 @@ def create_interface():
             fn=on_audio_wavtokenizer_visualize,
             inputs=[sample_idx],
             outputs=[original_audio, reconstructed_audio, debug_output]
+        )
+        
+        def on_relative_visualize(idx_val):
+            try:
+                idx = int(idx_val) if idx_val is not None else 0
+                return app.visualize_relative_motion(idx)
+            except Exception as e:
+                import traceback
+                error_msg = f"Error in on_relative_visualize: {str(e)}\n{traceback.format_exc()}"
+                return None, None, error_msg
+        
+        relative_btn.click(
+            fn=on_relative_visualize,
+            inputs=[sample_idx],
+            outputs=[leader_minus_follower_video, follower_minus_leader_video, debug_output]
         )
     
     return demo
