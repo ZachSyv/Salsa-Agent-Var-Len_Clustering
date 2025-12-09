@@ -43,6 +43,19 @@ def get_config():
                         help='Decoder architecture: gru or transformer')
     parser.add_argument('--use_vae', action='store_true', default=False,
                         help='Use VAE with reparameterization. If not set, uses vanilla autoencoder (no KL loss)')
+    parser.add_argument('--use_vqvae', action='store_true', default=False,
+                        help='Use VQ-VAE with vector quantization (overrides use_vae if set)')
+    parser.add_argument('--nb_code', type=int, default=512,
+                        help='Number of codebook entries for VQ-VAE (default: 512)')
+    parser.add_argument('--quantizer', type=str, default='ema_reset',
+                        choices=['ema_reset', 'orig', 'ema', 'reset'],
+                        help='Type of quantizer for VQ-VAE: ema_reset (default), orig, ema, or reset')
+    parser.add_argument('--vq_mu', type=float, default=0.99,
+                        help='EMA decay rate for VQ-VAE codebook updates (default: 0.99, used for ema_reset and ema)')
+    parser.add_argument('--vq_beta', type=float, default=1.0,
+                        help='Beta parameter for original quantizer (default: 1.0, used for quantizer=orig)')
+    parser.add_argument('--commit_weight', type=float, default=0.02,
+                        help='Weight for VQ-VAE commitment loss (default: 0.02)')
     
     # Transformer-specific parameters
     parser.add_argument('--num_heads', type=int, default=8,
@@ -62,17 +75,27 @@ def get_config():
                         help='Use Automatic Mixed Precision (AMP) for training to reduce memory usage')
     parser.add_argument('--num_epochs', type=int, default=100,
                         help='Number of training epochs')
-    parser.add_argument('--learning_rate', type=float, default=1e-4,
-                        help='Learning rate')
+    parser.add_argument('--learning_rate', type=float, default=2e-4,
+                        help='Learning rate (default: 2e-4, matches T2M-GPT)')
     parser.add_argument('--lr_scheduler', type=str, default=None,
-                        choices=[None, 'cosine', 'step'],
-                        help='Learning rate scheduler (None, cosine, or step)')
-    parser.add_argument('--weight_decay', type=float, default=1e-5,
-                        help='Weight decay for optimizer')
+                        choices=[None, 'cosine', 'step', 'multistep'],
+                        help='Learning rate scheduler (None, cosine, step, or multistep)')
+    parser.add_argument('--lr_scheduler_milestones', type=int, nargs='+', default=None,
+                        help='Milestones for MultiStepLR scheduler in epochs (default: None, will use [50, 200] if multistep selected). Note: T2M-GPT uses iterations [50000, 200000], convert to epochs based on your dataset size.')
+    parser.add_argument('--lr_scheduler_gamma', type=float, default=0.05,
+                        help='Gamma (decay factor) for MultiStepLR scheduler (default: 0.05, matches T2M-GPT)')
+    parser.add_argument('--warm_up_iter', type=int, default=None,
+                        help='Number of warm-up iterations with linear LR increase (default: None, will use warm_up_epochs if set)')
+    parser.add_argument('--warm_up_epochs', type=int, default=0,
+                        help='Number of warm-up epochs with linear LR increase (default: 0, overrides warm_up_iter if > 0)')
+    parser.add_argument('--weight_decay', type=float, default=0.0,
+                        help='Weight decay for optimizer (default: 0.0, matches T2M-GPT)')
     parser.add_argument('--recon_weight', type=float, default=1.0,
                         help='Weight for reconstruction loss')
     parser.add_argument('--kl_weight', type=float, default=0.0001,
                         help='Weight for KL divergence loss')
+    parser.add_argument('--loss_vel_weight', type=float, default=0.0,
+                        help='Weight for velocity loss (default: 0.0, recommended: 0.1 for VQ-VAE to match T2M-GPT)')
     
     # Data parameters
     parser.add_argument('--window_size', type=int, default=20,

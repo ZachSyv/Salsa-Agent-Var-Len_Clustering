@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import Dataset
 import lmdb
 import pyarrow
+import pickle
 from typing import Tuple, Optional
 from tqdm import tqdm
 
@@ -33,6 +34,7 @@ class MotionWindowDataset(Dataset):
         stride: int = 10,
         use_both_roles: bool = True,
         cache_dir: Optional[str] = None,
+        normalize: bool = True,
     ):
         """
         Initialize the dataset.
@@ -44,12 +46,14 @@ class MotionWindowDataset(Dataset):
             stride: Stride for window sampling (default: 10 frames)
             use_both_roles: If True, use both leader and follower motions (joint training)
             cache_dir: Optional cache directory for preprocessed windows
+            normalize: If True, normalize data using precomputed mean/std (default: True)
         """
         self.args = args
         self.lmdb_dir = lmdb_dir
         self.window_size = window_size
         self.stride = stride
         self.use_both_roles = use_both_roles
+        self.normalize = normalize
         
         # Determine cache directory - use descriptive name for VAE 20-frame windows
         if cache_dir is None:
@@ -69,10 +73,35 @@ class MotionWindowDataset(Dataset):
             self.n_samples = txn.stat()["entries"]
         
         print(f"Loaded {self.n_samples} motion windows from cache.")
+        
+        # Load normalization statistics
+        self.mean = None
+        self.std = None
+        self.epsilon = 1e-8  # Small value to avoid division by zero
+        
+        if self.normalize:
+            stats_path = os.path.join(self.cache_dir, 'normalization_stats.pkl')
+            if os.path.exists(stats_path):
+                print(f"Loading normalization statistics from {stats_path}...")
+                with open(stats_path, 'rb') as f:
+                    stats = pickle.load(f)
+                    self.mean = torch.from_numpy(stats['mean']).float()
+                    self.std = torch.from_numpy(stats['std']).float()
+                    print(f"  Mean shape: {self.mean.shape}, Std shape: {self.std.shape}")
+                    print(f"  Mean range: [{self.mean.min():.6f}, {self.mean.max():.6f}]")
+                    print(f"  Std range: [{self.std.min():.6f}, {self.std.max():.6f}]")
+                    # Check for constant dimensions
+                    constant_dims = (self.std < self.epsilon).sum().item()
+                    if constant_dims > 0:
+                        print(f"  Warning: {constant_dims} dimensions have std < {self.epsilon} (will not be normalized)")
+            else:
+                print(f"Warning: Normalization requested but stats file not found at {stats_path}")
+                print(f"  Set normalize=False or recreate cache to compute statistics.")
     
     def _create_cache(self):
         """
         Create cache of 20-frame windows directly from raw LMDB.
+        Also computes normalization statistics from all original frames (not windows).
         Follows the same pipeline as DataPreprocessor._sample_from_clip_pair.
         """
         # Open raw LMDB (same as DataPreprocessor does)
@@ -88,6 +117,9 @@ class MotionWindowDataset(Dataset):
         
         print("Creating 20-frame window cache from raw LMDB...")
         print("Following original DataPreprocessor pipeline...")
+        
+        # Collect all frames for normalization statistics (not windows, to avoid double-counting)
+        all_frames = []  # Will collect all individual frames from raw data
         
         # Follow the same structure as DataPreprocessor.run()
         src_txn = src_lmdb_env.begin(write=False)
@@ -114,6 +146,24 @@ class MotionWindowDataset(Dataset):
                             txn.put(key, value)
                             window_idx += 1
                     
+                    # Collect all frames from this clip for normalization stats
+                    # Extract raw motion data (not windows) to avoid double-counting overlapping frames
+                    clip_HM3D_joint_vec_L = clip['HML3D_joints_vec_L']
+                    clip_HM3D_joint_vec_F = clip['HML3D_joints_vec_F']
+                    
+                    # Convert to numpy if needed
+                    if isinstance(clip_HM3D_joint_vec_L, torch.Tensor):
+                        clip_HM3D_joint_vec_L = clip_HM3D_joint_vec_L.cpu().numpy()
+                    if isinstance(clip_HM3D_joint_vec_F, torch.Tensor):
+                        clip_HM3D_joint_vec_F = clip_HM3D_joint_vec_F.cpu().numpy()
+                    
+                    # Add all frames from both roles (if enabled)
+                    if self.use_both_roles:
+                        all_frames.append(clip_HM3D_joint_vec_L)  # (seq_len, 263)
+                        all_frames.append(clip_HM3D_joint_vec_F)  # (seq_len, 263)
+                    else:
+                        all_frames.append(clip_HM3D_joint_vec_L)  # (seq_len, 263)
+                    
                     counter += 1
                     
                     if counter % 10 == 0:
@@ -129,6 +179,51 @@ class MotionWindowDataset(Dataset):
         cache_env.close()
         src_lmdb_env.close()
         print(f"Cache creation complete. Total windows: {window_idx}")
+        
+        # Compute normalization statistics from all original frames
+        print(f"\nComputing normalization statistics from all original frames...")
+        print(f"  Collected {len(all_frames)} motion sequences")
+        
+        # Concatenate all frames: (total_frames, 263)
+        all_frames_array = np.concatenate(all_frames, axis=0)
+        total_frames = all_frames_array.shape[0]
+        print(f"  Total frames: {total_frames}")
+        print(f"  Frame shape: {all_frames_array.shape[1]} (should be 263)")
+        
+        # Calculate mean and std per dimension
+        mean = np.mean(all_frames_array, axis=0)  # (263,)
+        std = np.std(all_frames_array, axis=0)   # (263,)
+        
+        print(f"  Mean shape: {mean.shape}, Std shape: {std.shape}")
+        print(f"  Mean range: [{mean.min():.6f}, {mean.max():.6f}]")
+        print(f"  Std range: [{std.min():.6f}, {std.max():.6f}]")
+        
+        # Check for constant dimensions
+        epsilon = 1e-8
+        constant_dims = (std < epsilon).sum()
+        if constant_dims > 0:
+            print(f"  Warning: {constant_dims} dimensions have std < {epsilon}")
+            print(f"    These dimensions will not be normalized (std will be set to 1.0)")
+            # Set std to 1.0 for constant dimensions to avoid division by zero
+            std[std < epsilon] = 1.0
+        
+        # Save normalization statistics
+        stats_path = os.path.join(self.cache_dir, 'normalization_stats.pkl')
+        stats = {
+            'mean': mean,
+            'std': std,
+            'total_frames': total_frames,
+            'total_sequences': len(all_frames),
+            'window_size': self.window_size,
+            'stride': self.stride,
+            'use_both_roles': self.use_both_roles,
+        }
+        
+        with open(stats_path, 'wb') as f:
+            pickle.dump(stats, f)
+        
+        print(f"  Saved normalization statistics to: {stats_path}")
+        print(f"  Statistics computed from {total_frames} frames across {len(all_frames)} sequences")
     
     def _extract_windows_from_clip(self, clip: dict):
         """
@@ -203,7 +298,7 @@ class MotionWindowDataset(Dataset):
             idx: Index of the sample
         
         Returns:
-            motion: Motion tensor of shape (window_size=20, 263)
+            motion: Motion tensor of shape (window_size=20, 263), normalized if normalize=True
         """
         with self.lmdb_env.begin(write=False) as txn:
             key = "{:010}".format(idx).encode("ascii")
@@ -220,6 +315,12 @@ class MotionWindowDataset(Dataset):
             assert motion.shape == (self.window_size, 263), \
                 f"Expected shape ({self.window_size}, 263), got {motion.shape}"
             
+            # Apply normalization if enabled and stats are available
+            if self.normalize and self.mean is not None and self.std is not None:
+                # Normalize: (motion - mean) / (std + epsilon)
+                # mean and std are shape (263,), will broadcast to (window_size, 263)
+                motion = (motion - self.mean) / (self.std + self.epsilon)
+            
             return motion
 
 
@@ -232,6 +333,7 @@ def create_dataloader(
     shuffle: bool = True,
     num_workers: int = 4,
     use_both_roles: bool = True,
+    normalize: bool = True,
 ):
     """
     Create a DataLoader for motion windows.
@@ -245,6 +347,7 @@ def create_dataloader(
         shuffle: Whether to shuffle the dataset
         num_workers: Number of worker processes
         use_both_roles: Whether to use both leader and follower
+        normalize: Whether to normalize data using precomputed mean/std (default: True)
     
     Returns:
         DataLoader instance
@@ -257,6 +360,7 @@ def create_dataloader(
         window_size=window_size,
         stride=stride,
         use_both_roles=use_both_roles,
+        normalize=normalize,
     )
     
     dataloader = DataLoader(

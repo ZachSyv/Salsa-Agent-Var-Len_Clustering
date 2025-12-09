@@ -124,6 +124,7 @@ def main():
         shuffle=False,
         num_workers=4,
         use_both_roles=config.use_both_roles,
+        normalize=True,  # Use normalized data (default, matches training)
     )
     
     # Evaluate

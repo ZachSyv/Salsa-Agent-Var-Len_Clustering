@@ -51,7 +51,7 @@ class GRUEncoder(nn.Module):
         # Intermediate FC layer
         self.fc_intermediate = nn.Sequential(
             nn.Linear(gru_output_dim, hidden_dim),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Dropout(dropout)
         )
         
@@ -66,9 +66,40 @@ class GRUEncoder(nn.Module):
         Returns:
             output: Encoded representation (batch_size, output_dim)
         """
+        # Store input for debugging (always, not just in debug mode)
+        self._last_input = x.detach().clone()
+        
+        # DEBUG: Track input to fc_in (only for problematic batches or periodic checks)
+        # We'll use a global counter or check if this is a training batch
+        debug_mode = getattr(self, '_debug_mode', False)
+        if debug_mode:
+            print(f"\n[DEBUG ENCODER] Input to encoder:")
+            print(f"  x shape: {x.shape}")
+            print(f"  x stats: min={x.min().item():.4f}, max={x.max().item():.4f}, mean={x.mean().item():.4f}, std={x.std().item():.4f}")
+            print(f"  x has NaN: {torch.isnan(x).any().item()}, has Inf: {torch.isinf(x).any().item()}")
+        
         # x: (batch, 20, 263)
         # Apply input FC
-        x = self.fc_in(x)  # (batch, 20, hidden_dim)
+        x_fc_in = self.fc_in(x)  # (batch, 20, hidden_dim)
+        
+        # Store fc_in output for debugging
+        self._last_fc_in_output = x_fc_in.detach().clone()
+        
+        # DEBUG: Track output of fc_in
+        if debug_mode:
+            print(f"\n[DEBUG ENCODER] Output from fc_in:")
+            print(f"  x_fc_in shape: {x_fc_in.shape}")
+            print(f"  x_fc_in stats: min={x_fc_in.min().item():.4f}, max={x_fc_in.max().item():.4f}, mean={x_fc_in.mean().item():.4f}, std={x_fc_in.std().item():.4f}")
+            print(f"  x_fc_in has NaN: {torch.isnan(x_fc_in).any().item()}, has Inf: {torch.isinf(x_fc_in).any().item()}")
+            # Check fc_in weights (fc_in is Sequential with Linear at index 0)
+            fc_in_linear = self.fc_in[0]
+            if isinstance(fc_in_linear, torch.nn.Linear):
+                print(f"  fc_in[0] (Linear) weight stats: min={fc_in_linear.weight.min().item():.4f}, max={fc_in_linear.weight.max().item():.4f}, mean={fc_in_linear.weight.mean().item():.4f}, std={fc_in_linear.weight.std().item():.4f}")
+                print(f"  fc_in[0] weight has NaN: {torch.isnan(fc_in_linear.weight).any().item()}, has Inf: {torch.isinf(fc_in_linear.weight).any().item()}")
+                print(f"  fc_in[0] bias stats: min={fc_in_linear.bias.min().item():.4f}, max={fc_in_linear.bias.max().item():.4f}, mean={fc_in_linear.bias.mean().item():.4f}")
+                print(f"  fc_in[0] bias has NaN: {torch.isnan(fc_in_linear.bias).any().item()}, has Inf: {torch.isinf(fc_in_linear.bias).any().item()}")
+        
+        x = x_fc_in
         
         # Bidirectional GRU
         gru_out, hidden = self.gru(x)

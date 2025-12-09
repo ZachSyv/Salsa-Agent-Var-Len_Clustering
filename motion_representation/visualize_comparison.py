@@ -23,13 +23,34 @@ from utils.motion_utils import recover_from_ric, plot_3d_motion
 from utils.paramUtil import t2m_kinematic_chain
 
 
+def denormalize_motion(motion: np.ndarray, dataset_mean: np.ndarray = None, dataset_std: np.ndarray = None) -> np.ndarray:
+    """
+    Denormalize motion data if normalization was applied.
+    
+    Args:
+        motion: Normalized motion array (seq_len, 263)
+        dataset_mean: Mean used for normalization (263,)
+        dataset_std: Std used for normalization (263,)
+        
+    Returns:
+        Denormalized motion array
+    """
+    if dataset_mean is None or dataset_std is None:
+        return motion
+    
+    # Denormalize: motion * std + mean
+    return motion * dataset_std + dataset_mean
+
+
 def create_side_by_side_comparison(
     original_motion,
     reconstructed_motion,
     output_path,
     title_original="Original",
     title_reconstructed="Reconstructed",
-    fps=20
+    fps=20,
+    dataset_mean=None,
+    dataset_std=None
 ):
     """
     Create a side-by-side comparison video of original and reconstructed motions.
@@ -41,10 +62,16 @@ def create_side_by_side_comparison(
         title_original: Title for original motion
         title_reconstructed: Title for reconstructed motion
         fps: Frames per second for the video
+        dataset_mean: Mean for denormalization (263,) - required if motion is normalized
+        dataset_std: Std for denormalization (263,) - required if motion is normalized
     """
     # Convert to 3D keypoints if needed
     if original_motion.shape[-1] == 263:
-        # HumanML3D format - convert to 3D keypoints
+        # HumanML3D format - denormalize first if needed
+        if dataset_mean is not None and dataset_std is not None:
+            original_motion = denormalize_motion(original_motion, dataset_mean, dataset_std)
+        
+        # Convert to 3D keypoints
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         original_keypoints = recover_from_ric(
             torch.from_numpy(original_motion).float().to(device),
@@ -54,7 +81,11 @@ def create_side_by_side_comparison(
         original_keypoints = original_motion
     
     if reconstructed_motion.shape[-1] == 263:
-        # HumanML3D format - convert to 3D keypoints
+        # HumanML3D format - denormalize first if needed
+        if dataset_mean is not None and dataset_std is not None:
+            reconstructed_motion = denormalize_motion(reconstructed_motion, dataset_mean, dataset_std)
+        
+        # Convert to 3D keypoints
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         reconstructed_keypoints = recover_from_ric(
             torch.from_numpy(reconstructed_motion).float().to(device),
@@ -114,6 +145,16 @@ def visualize_samples(
     """
     os.makedirs(output_dir, exist_ok=True)
     
+    # Get normalization stats from dataset if available
+    dataset = dataloader.dataset
+    dataset_mean = None
+    dataset_std = None
+    if hasattr(dataset, 'normalize') and dataset.normalize:
+        if hasattr(dataset, 'mean') and dataset.mean is not None:
+            dataset_mean = dataset.mean.numpy() if isinstance(dataset.mean, torch.Tensor) else dataset.mean
+        if hasattr(dataset, 'std') and dataset.std is not None:
+            dataset_std = dataset.std.numpy() if isinstance(dataset.std, torch.Tensor) else dataset.std
+    
     model.eval()
     
     sample_count = 0
@@ -125,17 +166,28 @@ def visualize_samples(
             motion_batch = motion_batch.to(device)
             batch_size = motion_batch.size(0)
             
-            # Reconstruct
-            # Note: model.forward() automatically extracts first frame and uses it for decoder
-            recon_motion, mean, logvar, z = model(motion_batch)
+            # Reconstruct - handle different model types
+            forward_result = model(motion_batch)
+            
+            # VQ-VAE returns: (recon_x, z, commit_loss, perplexity, code_idx)
+            # VAE/Vanilla returns: (recon_x, mean, logvar, z)
+            if model.use_vqvae:
+                recon_motion, z, commit_loss, perplexity, code_idx = forward_result
+            else:
+                recon_motion, mean, logvar, z = forward_result
             
             # Process each sample in the batch
             for i in range(min(batch_size, num_samples - sample_count)):
-                original = motion_batch[i].cpu().numpy()  # (20, 263)
-                reconstructed = recon_motion[i].cpu().numpy()  # (20, 263)
+                original = motion_batch[i].cpu().numpy()  # (20, 263) - normalized if dataset.normalize=True
+                reconstructed = recon_motion[i].cpu().numpy()  # (20, 263) - normalized
                 
-                # Compute reconstruction error
-                mse = np.mean((original - reconstructed) ** 2)
+                # Denormalize for metric computation (more meaningful)
+                if dataset_mean is not None and dataset_std is not None:
+                    original_denorm = denormalize_motion(original, dataset_mean, dataset_std)
+                    reconstructed_denorm = denormalize_motion(reconstructed, dataset_mean, dataset_std)
+                    mse = np.mean((original_denorm - reconstructed_denorm) ** 2)
+                else:
+                    mse = np.mean((original - reconstructed) ** 2)
                 
                 output_path = os.path.join(
                     output_dir,
@@ -151,7 +203,9 @@ def visualize_samples(
                     output_path,
                     title_original=f"Original (Sample {sample_count + 1})",
                     title_reconstructed=f"Reconstructed (MSE: {mse:.4f})",
-                    fps=fps
+                    fps=fps,
+                    dataset_mean=dataset_mean,
+                    dataset_std=dataset_std
                 )
                 
                 sample_count += 1
@@ -220,6 +274,7 @@ def main():
         shuffle=False,
         num_workers=2,
         use_both_roles=True,
+        normalize=True,  # Use normalized data (default, matches training)
     )
     
     # Visualize
