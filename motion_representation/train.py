@@ -146,11 +146,11 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, writer=None
                 if not use_vqvae:
                     if torch.isnan(mean).any() or torch.isnan(logvar).any():
                         print(f"\n❌ ERROR: NaN detected in model outputs at epoch {epoch}, batch {batch_idx}")
-                        print(f"  mean NaN: {torch.isnan(mean).sum().item()}")
-                        print(f"  logvar NaN: {torch.isnan(logvar).sum().item()}")
-                        print(f"  logvar range: [{logvar.min().item():.4f}, {logvar.max().item():.4f}]")
-                        print("🛑 Stopping training due to NaN in model outputs!")
-                        raise RuntimeError("NaN detected in model outputs - training stopped")
+                    print(f"  mean NaN: {torch.isnan(mean).sum().item()}")
+                    print(f"  logvar NaN: {torch.isnan(logvar).sum().item()}")
+                    print(f"  logvar range: [{logvar.min().item():.4f}, {logvar.max().item():.4f}]")
+                    print("🛑 Stopping training due to NaN in model outputs!")
+                    raise RuntimeError("NaN detected in model outputs - training stopped")
                 
                 # Compute loss within autocast context
                 loss, recon_loss, kl_loss, vel_loss = vae_loss(
@@ -217,11 +217,11 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, writer=None
             if not use_vqvae:
                 if torch.isnan(mean).any() or torch.isnan(logvar).any():
                     print(f"\n❌ ERROR: NaN detected in model outputs at epoch {epoch}, batch {batch_idx}")
-                    print(f"  mean NaN: {torch.isnan(mean).sum().item()}")
-                    print(f"  logvar NaN: {torch.isnan(logvar).sum().item()}")
-                    print(f"  logvar range: [{logvar.min().item():.4f}, {logvar.max().item():.4f}]")
-                    print("🛑 Stopping training due to NaN in model outputs!")
-                    raise RuntimeError("NaN detected in model outputs - training stopped")
+                print(f"  mean NaN: {torch.isnan(mean).sum().item()}")
+                print(f"  logvar NaN: {torch.isnan(logvar).sum().item()}")
+                print(f"  logvar range: [{logvar.min().item():.4f}, {logvar.max().item():.4f}]")
+                print("🛑 Stopping training due to NaN in model outputs!")
+                raise RuntimeError("NaN detected in model outputs - training stopped")
             
             # Compute loss
             loss, recon_loss, kl_loss, vel_loss = vae_loss(
@@ -718,6 +718,18 @@ def main():
     device = torch.device(config.device if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    # Check if training relationship features
+    train_relationship = getattr(config, 'train_relationship', False)
+    if train_relationship:
+        print("="*60)
+        print("TRAINING RELATIONSHIP VQ-VAE")
+        print("="*60)
+        # Override input_dim for relationship features (4 dims: 3 translation + 1 rotation)
+        config.input_dim = 4
+        print(f"Using relationship features: input_dim={config.input_dim}")
+    else:
+        print(f"Using individual motion features: input_dim={config.input_dim}")
+    
     # Create data loaders
     print("Loading dataset...")
     train_loader = create_dataloader(
@@ -730,6 +742,7 @@ def main():
         num_workers=config.num_workers,
         use_both_roles=config.use_both_roles,
         normalize=True,  # Use normalized data (default, recommended for training)
+        train_relationship=train_relationship,
     )
     
     print(f"Dataset size: {len(train_loader.dataset)} samples")

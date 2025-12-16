@@ -24,6 +24,7 @@ class MotionWindowDataset(Dataset):
     """
     Dataset for 20-frame motion windows from Salsa dance pairs.
     Loads both leader and follower motions and treats them equally (joint training).
+    Can also extract relationship features between leader and follower when train_relationship=True.
     """
     
     def __init__(
@@ -35,6 +36,7 @@ class MotionWindowDataset(Dataset):
         use_both_roles: bool = True,
         cache_dir: Optional[str] = None,
         normalize: bool = True,
+        train_relationship: bool = False,
     ):
         """
         Initialize the dataset.
@@ -47,6 +49,7 @@ class MotionWindowDataset(Dataset):
             use_both_roles: If True, use both leader and follower motions (joint training)
             cache_dir: Optional cache directory for preprocessed windows
             normalize: If True, normalize data using precomputed mean/std (default: True)
+            train_relationship: If True, extract relationship features between leader and follower
         """
         self.args = args
         self.lmdb_dir = lmdb_dir
@@ -54,11 +57,21 @@ class MotionWindowDataset(Dataset):
         self.stride = stride
         self.use_both_roles = use_both_roles
         self.normalize = normalize
+        self.train_relationship = train_relationship
         
-        # Determine cache directory - use descriptive name for VAE 20-frame windows
+        # Determine cache directory - use different name for relationship features
         if cache_dir is None:
-            cache_dir = lmdb_dir + f"_VAE_20frames_cache"
+            if train_relationship:
+                cache_dir = lmdb_dir + f"_Relationship_20frames_cache"
+            else:
+                cache_dir = lmdb_dir + f"_VAE_20frames_cache"
         self.cache_dir = cache_dir
+        
+        # Relationship feature dimension (will be computed from relationship_features.py)
+        if train_relationship:
+            self.relationship_feature_dim = 4  # 3 translation + 1 rotation
+        else:
+            self.relationship_feature_dim = None
         
         # Check if cache exists, if not create it
         if not os.path.exists(self.cache_dir):
@@ -103,6 +116,7 @@ class MotionWindowDataset(Dataset):
         Create cache of 20-frame windows directly from raw LMDB.
         Also computes normalization statistics from all original frames (not windows).
         Follows the same pipeline as DataPreprocessor._sample_from_clip_pair.
+        If train_relationship=True, extracts relationship features instead of individual motions.
         """
         # Open raw LMDB (same as DataPreprocessor does)
         src_lmdb_env = lmdb.open(self.lmdb_dir, readonly=True, lock=False)
@@ -115,11 +129,14 @@ class MotionWindowDataset(Dataset):
         window_idx = 0
         skeleton_resampling_fps = 20  # Same as original pipeline
         
-        print("Creating 20-frame window cache from raw LMDB...")
-        print("Following original DataPreprocessor pipeline...")
+        if self.train_relationship:
+            print("Creating 20-frame relationship features cache from raw LMDB...")
+        else:
+            print("Creating 20-frame window cache from raw LMDB...")
+            print("Following original DataPreprocessor pipeline...")
         
         # Collect all frames for normalization statistics (not windows, to avoid double-counting)
-        all_frames = []  # Will collect all individual frames from raw data
+        all_frames = []  # Will collect all individual frames from raw data (or relationship features)
         
         # Follow the same structure as DataPreprocessor.run()
         src_txn = src_lmdb_env.begin(write=False)
@@ -148,21 +165,51 @@ class MotionWindowDataset(Dataset):
                     
                     # Collect all frames from this clip for normalization stats
                     # Extract raw motion data (not windows) to avoid double-counting overlapping frames
-                    clip_HM3D_joint_vec_L = clip['HML3D_joints_vec_L']
-                    clip_HM3D_joint_vec_F = clip['HML3D_joints_vec_F']
-                    
-                    # Convert to numpy if needed
-                    if isinstance(clip_HM3D_joint_vec_L, torch.Tensor):
-                        clip_HM3D_joint_vec_L = clip_HM3D_joint_vec_L.cpu().numpy()
-                    if isinstance(clip_HM3D_joint_vec_F, torch.Tensor):
-                        clip_HM3D_joint_vec_F = clip_HM3D_joint_vec_F.cpu().numpy()
-                    
-                    # Add all frames from both roles (if enabled)
-                    if self.use_both_roles:
-                        all_frames.append(clip_HM3D_joint_vec_L)  # (seq_len, 263)
-                        all_frames.append(clip_HM3D_joint_vec_F)  # (seq_len, 263)
+                    if self.train_relationship:
+                        # For relationship features, use original keypoints3d (not HumanML3D)
+                        from motion_representation.utils.relationship_features import extract_relationship_features_from_keypoints3d
+                        
+                        clip_keypoints3d_L = clip['keypoints3d_L']
+                        clip_keypoints3d_F = clip['keypoints3d_F']
+                        
+                        # Convert to numpy if needed
+                        if isinstance(clip_keypoints3d_L, torch.Tensor):
+                            clip_keypoints3d_L = clip_keypoints3d_L.cpu().numpy()
+                        if isinstance(clip_keypoints3d_F, torch.Tensor):
+                            clip_keypoints3d_F = clip_keypoints3d_F.cpu().numpy()
+                        
+                        # Both must have same sequence length
+                        seq_len_L = clip_keypoints3d_L.shape[0]
+                        seq_len_F = clip_keypoints3d_F.shape[0]
+                        seq_len = min(seq_len_L, seq_len_F)
+                        
+                        # Truncate to same length if needed
+                        if seq_len_L != seq_len_F:
+                            clip_keypoints3d_L = clip_keypoints3d_L[:seq_len]
+                            clip_keypoints3d_F = clip_keypoints3d_F[:seq_len]
+                        
+                        # Compute relationship features from all frames
+                        relationship_features = extract_relationship_features_from_keypoints3d(
+                            clip_keypoints3d_L, clip_keypoints3d_F
+                        )  # (seq_len, 4)
+                        all_frames.append(relationship_features)
                     else:
-                        all_frames.append(clip_HM3D_joint_vec_L)  # (seq_len, 263)
+                        # For regular motions, use HumanML3D representation
+                        clip_HM3D_joint_vec_L = clip['HML3D_joints_vec_L']
+                        clip_HM3D_joint_vec_F = clip['HML3D_joints_vec_F']
+                        
+                        # Convert to numpy if needed
+                        if isinstance(clip_HM3D_joint_vec_L, torch.Tensor):
+                            clip_HM3D_joint_vec_L = clip_HM3D_joint_vec_L.cpu().numpy()
+                        if isinstance(clip_HM3D_joint_vec_F, torch.Tensor):
+                            clip_HM3D_joint_vec_F = clip_HM3D_joint_vec_F.cpu().numpy()
+                        
+                        # Collect individual motions for normalization statistics
+                        if self.use_both_roles:
+                            all_frames.append(clip_HM3D_joint_vec_L)  # (seq_len, 263)
+                            all_frames.append(clip_HM3D_joint_vec_F)  # (seq_len, 263)
+                        else:
+                            all_frames.append(clip_HM3D_joint_vec_L)  # (seq_len, 263)
                     
                     counter += 1
                     
@@ -184,11 +231,18 @@ class MotionWindowDataset(Dataset):
         print(f"\nComputing normalization statistics from all original frames...")
         print(f"  Collected {len(all_frames)} motion sequences")
         
-        # Concatenate all frames: (total_frames, 263)
+        # Concatenate all frames
+        if self.train_relationship:
+            # For relationship features: (total_frames, 4)
+            expected_dim = 4
+        else:
+            # For regular motions: (total_frames, 263)
+            expected_dim = 263
+        
         all_frames_array = np.concatenate(all_frames, axis=0)
         total_frames = all_frames_array.shape[0]
         print(f"  Total frames: {total_frames}")
-        print(f"  Frame shape: {all_frames_array.shape[1]} (should be 263)")
+        print(f"  Frame shape: {all_frames_array.shape[1]} (should be {expected_dim})")
         
         # Calculate mean and std per dimension
         mean = np.mean(all_frames_array, axis=0)  # (263,)
@@ -217,6 +271,7 @@ class MotionWindowDataset(Dataset):
             'window_size': self.window_size,
             'stride': self.stride,
             'use_both_roles': self.use_both_roles,
+            'train_relationship': self.train_relationship,
         }
         
         with open(stats_path, 'wb') as f:
@@ -228,12 +283,15 @@ class MotionWindowDataset(Dataset):
     def _extract_windows_from_clip(self, clip: dict):
         """
         Extract 20-frame windows from a clip, following DataPreprocessor._sample_from_clip_pair.
+        If train_relationship=True, extracts relationship features from paired leader-follower windows.
         
         Args:
             clip: Clip dictionary from raw LMDB (same format as in DataPreprocessor)
         
         Returns:
-            List of 20-frame windows (each is numpy array of shape (20, 263))
+            List of 20-frame windows:
+            - If train_relationship=False: each is numpy array of shape (20, 263)
+            - If train_relationship=True: each is numpy array of shape (20, 4) - relationship features
         """
         windows = []
         
@@ -247,42 +305,96 @@ class MotionWindowDataset(Dataset):
         if isinstance(clip_HM3D_joint_vec_F, torch.Tensor):
             clip_HM3D_joint_vec_F = clip_HM3D_joint_vec_F.cpu().numpy()
         
-        # Process motions (same logic as original, but extract 20-frame windows)
-        motions_to_process = []
-        if self.use_both_roles:
-            motions_to_process = [
-                ('L', clip_HM3D_joint_vec_L),
-                ('F', clip_HM3D_joint_vec_F)
-            ]
-        else:
-            motions_to_process = [('L', clip_HM3D_joint_vec_L)]
-        
-        for role, motion in motions_to_process:
-            seq_len = motion.shape[0]
+        if self.train_relationship:
+            # Extract relationship features from original keypoints3d (not HumanML3D)
+            from motion_representation.utils.relationship_features import extract_relationship_features_from_keypoints3d
+            
+            # Load keypoints3d from clip (original 3D positions, not normalized)
+            clip_keypoints3d_L = clip['keypoints3d_L']
+            clip_keypoints3d_F = clip['keypoints3d_F']
+            
+            # Convert to numpy if needed
+            if isinstance(clip_keypoints3d_L, torch.Tensor):
+                clip_keypoints3d_L = clip_keypoints3d_L.cpu().numpy()
+            if isinstance(clip_keypoints3d_F, torch.Tensor):
+                clip_keypoints3d_F = clip_keypoints3d_F.cpu().numpy()
+            
+            # Both leader and follower must have same sequence length
+            seq_len_L = clip_keypoints3d_L.shape[0]
+            seq_len_F = clip_keypoints3d_F.shape[0]
+            seq_len = min(seq_len_L, seq_len_F)
             
             # Skip if sequence is too short
             if seq_len < self.window_size:
-                continue
+                return windows
+            
+            # Truncate to same length if needed
+            if seq_len_L != seq_len_F:
+                clip_keypoints3d_L = clip_keypoints3d_L[:seq_len]
+                clip_keypoints3d_F = clip_keypoints3d_F[:seq_len]
             
             # Create overlapping windows (same logic as original subdivision)
-            # num_subdivision = floor((seq_len - window_size) / stride) + 1
             num_windows = math.floor((seq_len - self.window_size) / self.stride) + 1
             
             for i in range(num_windows):
                 start_idx = i * self.stride
                 fin_idx = start_idx + self.window_size
                 
-                # Check bounds (same as original)
+                # Check bounds
                 if fin_idx > seq_len:
                     continue
                 
-                window = motion[start_idx:fin_idx]  # (window_size, 263)
+                # Extract paired windows from keypoints3d
+                window_keypoints3d_L = clip_keypoints3d_L[start_idx:fin_idx]  # (window_size, 22, 3)
+                window_keypoints3d_F = clip_keypoints3d_F[start_idx:fin_idx]  # (window_size, 22, 3)
                 
                 # Ensure exactly window_size frames
-                if window.shape[0] != self.window_size:
+                if window_keypoints3d_L.shape[0] != self.window_size or window_keypoints3d_F.shape[0] != self.window_size:
                     continue
                 
-                windows.append(window)
+                # Compute relationship features from original keypoints3d
+                relationship_window = extract_relationship_features_from_keypoints3d(
+                    window_keypoints3d_L, window_keypoints3d_F
+                )  # (window_size, 4)
+                
+                windows.append(relationship_window)
+        else:
+            # Process motions (same logic as original, but extract 20-frame windows)
+            motions_to_process = []
+            if self.use_both_roles:
+                motions_to_process = [
+                    ('L', clip_HM3D_joint_vec_L),
+                    ('F', clip_HM3D_joint_vec_F)
+                ]
+            else:
+                motions_to_process = [('L', clip_HM3D_joint_vec_L)]
+            
+            for role, motion in motions_to_process:
+                seq_len = motion.shape[0]
+                
+                # Skip if sequence is too short
+                if seq_len < self.window_size:
+                    continue
+                
+                # Create overlapping windows (same logic as original subdivision)
+                # num_subdivision = floor((seq_len - window_size) / stride) + 1
+                num_windows = math.floor((seq_len - self.window_size) / self.stride) + 1
+                
+                for i in range(num_windows):
+                    start_idx = i * self.stride
+                    fin_idx = start_idx + self.window_size
+                    
+                    # Check bounds (same as original)
+                    if fin_idx > seq_len:
+                        continue
+                    
+                    window = motion[start_idx:fin_idx]  # (window_size, 263)
+                    
+                    # Ensure exactly window_size frames
+                    if window.shape[0] != self.window_size:
+                        continue
+                    
+                    windows.append(window)
         
         return windows
     
@@ -298,7 +410,9 @@ class MotionWindowDataset(Dataset):
             idx: Index of the sample
         
         Returns:
-            motion: Motion tensor of shape (window_size=20, 263), normalized if normalize=True
+            motion: Motion tensor of shape:
+            - (window_size=20, 263) if train_relationship=False, normalized if normalize=True
+            - (window_size=20, 4) if train_relationship=True, normalized if normalize=True
         """
         with self.lmdb_env.begin(write=False) as txn:
             key = "{:010}".format(idx).encode("ascii")
@@ -311,14 +425,19 @@ class MotionWindowDataset(Dataset):
             # Copy array to make it writable and avoid warnings
             motion = torch.from_numpy(motion.copy()).float()
             
-            # Ensure correct shape: (window_size, 263)
-            assert motion.shape == (self.window_size, 263), \
-                f"Expected shape ({self.window_size}, 263), got {motion.shape}"
+            # Ensure correct shape
+            if self.train_relationship:
+                expected_shape = (self.window_size, 4)
+            else:
+                expected_shape = (self.window_size, 263)
+            
+            assert motion.shape == expected_shape, \
+                f"Expected shape {expected_shape}, got {motion.shape}"
             
             # Apply normalization if enabled and stats are available
             if self.normalize and self.mean is not None and self.std is not None:
                 # Normalize: (motion - mean) / (std + epsilon)
-                # mean and std are shape (263,), will broadcast to (window_size, 263)
+                # mean and std are shape (feature_dim,), will broadcast to (window_size, feature_dim)
                 motion = (motion - self.mean) / (self.std + self.epsilon)
             
             return motion
@@ -334,6 +453,7 @@ def create_dataloader(
     num_workers: int = 4,
     use_both_roles: bool = True,
     normalize: bool = True,
+    train_relationship: bool = False,
 ):
     """
     Create a DataLoader for motion windows.
@@ -348,6 +468,7 @@ def create_dataloader(
         num_workers: Number of worker processes
         use_both_roles: Whether to use both leader and follower
         normalize: Whether to normalize data using precomputed mean/std (default: True)
+        train_relationship: If True, extract relationship features between leader and follower
     
     Returns:
         DataLoader instance
@@ -361,6 +482,7 @@ def create_dataloader(
         stride=stride,
         use_both_roles=use_both_roles,
         normalize=normalize,
+        train_relationship=train_relationship,
     )
     
     dataloader = DataLoader(

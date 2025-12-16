@@ -106,6 +106,8 @@ def get_config():
                         help='Use both leader and follower motions (joint training)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loader workers')
+    parser.add_argument('--train_relationship', action='store_true', default=False,
+                        help='Train on relationship features between leader and follower (instead of individual motions)')
     
     # Checkpoint and logging
     parser.add_argument('--checkpoint_dir', type=str,

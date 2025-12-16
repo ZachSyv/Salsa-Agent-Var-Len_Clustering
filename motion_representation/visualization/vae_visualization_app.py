@@ -60,7 +60,34 @@ class VAEVisualizationApp:
             if not os.path.exists(checkpoint_path):
                 return f"Error: Checkpoint not found: {checkpoint_path}", False
             
+            # Validate checkpoint file before loading
+            file_size = os.path.getsize(checkpoint_path)
+            if file_size == 0:
+                return f"Error: Checkpoint file is empty: {checkpoint_path}", False
+            
+            if file_size < 1024:  # Less than 1KB is suspicious
+                return f"Error: Checkpoint file is too small ({file_size} bytes). It may be corrupted or incomplete: {checkpoint_path}", False
+            
+            # Try to validate it's a valid zip file (PyTorch checkpoints are zip archives)
+            import zipfile
+            try:
+                with zipfile.ZipFile(checkpoint_path, 'r') as zip_file:
+                    # Check if it's a valid zip file
+                    zip_file.testzip()
+            except zipfile.BadZipFile:
+                return f"Error: Checkpoint file is not a valid PyTorch checkpoint (corrupted zip archive): {checkpoint_path}\n\nPossible causes:\n- File was not fully written (training interrupted)\n- File was corrupted during transfer\n- File is not a PyTorch checkpoint\n\nPlease check the file or try loading a different checkpoint.", False
+            except Exception as zip_error:
+                # If it's not a zip file at all, that's also a problem
+                return f"Error: Checkpoint file validation failed: {str(zip_error)}\n\nFile: {checkpoint_path}", False
+            
+            # Now try to load the checkpoint
+            try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            except RuntimeError as e:
+                if "failed reading zip archive" in str(e) or "central directory" in str(e):
+                    return f"Error: Checkpoint file is corrupted or incomplete: {checkpoint_path}\n\nError details: {str(e)}\n\nPossible causes:\n- File was not fully written (training interrupted)\n- File was corrupted during transfer\n- Disk space issue during checkpoint saving\n\nPlease check:\n1. File size: {file_size:,} bytes\n2. Try loading 'best_checkpoint.pth' or another checkpoint file\n3. Check if training completed successfully", False
+                else:
+                    raise  # Re-raise if it's a different RuntimeError
             self.config = checkpoint['config']
             
             self.model = MotionModel(
@@ -163,13 +190,14 @@ class VAEVisualizationApp:
             error_msg = f"Error loading model: {str(e)}\n{traceback.format_exc()}"
             return error_msg, False
     
-    def load_dataset(self, lmdb_dir: str, is_MDM: bool = True) -> Tuple[str, int]:
+    def load_dataset(self, lmdb_dir: str, is_MDM: bool = True, train_relationship: bool = False) -> Tuple[str, int]:
         """
         Load dataset.
         
         Args:
             lmdb_dir: Path to LMDB directory
             is_MDM: Whether data is in MDM format
+            train_relationship: If True, load relationship features (4D) instead of motions (263D)
             
         Returns:
             Status message and total samples
@@ -196,6 +224,7 @@ class VAEVisualizationApp:
                 num_workers=2,
                 use_both_roles=True,
                 normalize=True,  # Use normalized data (default)
+                train_relationship=train_relationship,  # Support relationship features
             )
             
             total_samples = len(self.dataloader.dataset)
@@ -1452,6 +1481,170 @@ class VAEVisualizationApp:
             import traceback
             error_msg = f"Error visualizing combined reconstruction: {str(e)}\n{traceback.format_exc()}"
             return None, None, error_msg
+    
+    def visualize_relationship_features(self, idx: int) -> Tuple[Optional[object], str]:
+        """
+        Visualize relationship features as time series plots for each dimension.
+        
+        Args:
+            idx: Sample index from dataset
+            
+        Returns:
+            Tuple of (plotly_figure_object, info_string)
+        """
+        if self.model is None:
+            return None, "Error: Model not loaded. Please load a model first."
+        
+        if self.dataloader is None:
+            return None, "Error: Dataset not loaded. Please load dataset first."
+        
+        try:
+            if idx < 0 or idx >= len(self.dataloader.dataset):
+                return None, f"Error: Index {idx} out of range (0-{len(self.dataloader.dataset)-1})"
+            
+            # Get sample (already normalized if dataset.normalize=True)
+            # For relationship features, shape is (20, 4)
+            features = self.dataloader.dataset[idx]  # (20, 4) or (20, 263)
+            
+            # Validate that we're working with relationship features (4D)
+            if features.shape[1] != 4:
+                return None, f"Error: Expected 4D relationship features, but got shape {features.shape}. Please ensure you loaded the dataset with 'Load Relationship Features' checked."
+            features = features.unsqueeze(0).to(self.device)  # (1, 20, 4)
+            
+            # Reconstruct - handle different model types
+            with torch.no_grad():
+                forward_result = self.model(features)
+                
+                # VQ-VAE returns: (recon_x, z, commit_loss, perplexity, code_idx)
+                # VAE/Vanilla returns: (recon_x, mean, logvar, z)
+                if self.model.use_vqvae:
+                    recon_features, z, commit_loss, perplexity, code_idx = forward_result
+                    mean = None
+                    logvar = None
+                else:
+                    recon_features, mean, logvar, z = forward_result
+            
+            # Convert to numpy
+            original = features[0].cpu().numpy()  # (20, 4) - normalized
+            reconstructed = recon_features[0].cpu().numpy()  # (20, 4) - normalized
+            
+            # Denormalize if needed
+            if self.dataloader.dataset.normalize and self.dataloader.dataset.mean is not None:
+                original_denorm = self._denormalize_motion(original)
+                reconstructed_denorm = self._denormalize_motion(reconstructed)
+            else:
+                original_denorm = original
+                reconstructed_denorm = reconstructed
+            
+            # Compute metrics for each dimension
+            dim_names = [
+                "Root Translation X (leader_x - follower_x)",
+                "Root Translation Z (leader_z - follower_z)",
+                "Root Translation Y/Height (leader_y - follower_y)",
+                "Root Rotation Difference (leader_rot - follower_rot)"
+            ]
+            
+            dim_short_names = ["Trans X", "Trans Z", "Trans Y", "Rotation"]
+            
+            metrics = []
+            for dim in range(4):
+                mse = np.mean((original_denorm[:, dim] - reconstructed_denorm[:, dim]) ** 2)
+                mae = np.mean(np.abs(original_denorm[:, dim] - reconstructed_denorm[:, dim]))
+                metrics.append((mse, mae))
+            
+            # Create time series plots using plotly
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            
+            # Create subplots: 2x2 grid
+            fig = make_subplots(
+                rows=2, cols=2,
+                subplot_titles=dim_names,
+                vertical_spacing=0.12,
+                horizontal_spacing=0.12
+            )
+            
+            # Time axis (frames 0-19)
+            time_axis = np.arange(20)
+            
+            # Plot each dimension
+            for dim in range(4):
+                row = (dim // 2) + 1
+                col = (dim % 2) + 1
+                
+                # Original (ground truth) - blue line
+                fig.add_trace(
+                    go.Scatter(
+                        x=time_axis,
+                        y=original_denorm[:, dim],
+                        mode='lines+markers',
+                        name='Original',
+                        line=dict(color='blue', width=2),
+                        marker=dict(size=4),
+                        showlegend=(dim == 0)  # Only show legend for first plot
+                    ),
+                    row=row, col=col
+                )
+                
+                # Reconstructed - red line
+                fig.add_trace(
+                    go.Scatter(
+                        x=time_axis,
+                        y=reconstructed_denorm[:, dim],
+                        mode='lines+markers',
+                        name='Reconstructed',
+                        line=dict(color='red', width=2, dash='dash'),
+                        marker=dict(size=4),
+                        showlegend=(dim == 0)  # Only show legend for first plot
+                    ),
+                    row=row, col=col
+                )
+                
+                # Update axes labels
+                fig.update_xaxes(title_text="Frame", row=row, col=col)
+                fig.update_yaxes(title_text="Feature Value", row=row, col=col)
+                
+                # Add metrics as annotation
+                mse, mae = metrics[dim]
+                fig.add_annotation(
+                    text=f"MSE: {mse:.6f}<br>MAE: {mae:.6f}",
+                    xref=f"x{dim+1}", yref=f"y{dim+1}",
+                    x=0.02, y=0.98,
+                    xanchor='left', yanchor='top',
+                    showarrow=False,
+                    bgcolor="rgba(255,255,255,0.8)",
+                    bordercolor="black",
+                    borderwidth=1,
+                    row=row, col=col
+                )
+            
+            # Update layout
+            fig.update_layout(
+                height=800,
+                title_text="Relationship Features: Original vs Reconstructed",
+                title_x=0.5,
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            
+            # Build info string
+            info = f"Relationship Features Visualization\n"
+            info += f"{'='*60}\n"
+            info += f"Sample Index: {idx}\n"
+            info += f"Window Size: 20 frames\n"
+            info += f"Feature Dimensions: 4\n\n"
+            info += f"Error Metrics:\n"
+            for dim in range(4):
+                mse, mae = metrics[dim]
+                info += f"  {dim_short_names[dim]}: MSE={mse:.6f}, MAE={mae:.6f}\n"
+            info += f"\nModel: {'VQ-VAE' if self.model.use_vqvae else 'VAE' if self.model.use_vae else 'Vanilla AE'}"
+            
+            return fig, info
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Error visualizing relationship features: {str(e)}\n{traceback.format_exc()}"
+            return None, error_msg
 
 
 def create_interface():
@@ -1488,7 +1681,7 @@ def create_interface():
                 checkpoint_path = gr.Textbox(
                     label="Checkpoint Path",
                     value="motion_representation/checkpoints/best_checkpoint.pth",
-                    placeholder="Path to VAE checkpoint"
+                    placeholder="Path to VAE checkpoint (e.g., motion_representation/checkpoints_Relationship_VQVAE_GRU/best_checkpoint.pth)"
                 )
                 load_model_btn = gr.Button("Load Model", variant="primary")
                 model_status = gr.Textbox(label="Model Status", interactive=False, lines=3)
@@ -1499,6 +1692,11 @@ def create_interface():
                     placeholder="Path to LMDB directory"
                 )
                 is_MDM = gr.Checkbox(label="Is MDM Format", value=True)
+                train_relationship = gr.Checkbox(
+                    label="Load Relationship Features (4D)",
+                    value=False,
+                    info="Check if loading relationship features instead of motion data"
+                )
                 load_dataset_btn = gr.Button("Load Dataset", variant="primary")
                 dataset_status = gr.Textbox(label="Dataset Status", interactive=False, lines=2)
             
@@ -1581,9 +1779,9 @@ def create_interface():
                             info="Adjust Gaussian smoothing for heatmap"
                         )
                 
-                latent_info = gr.Textbox(label="Latent Space Info", interactive=False, lines=8)
-                gr.Markdown("**💡 Tip:** Click on any point in the t-SNE plot to visualize that sample!<br>Or manually enter the sample index (shown in hover tooltip) below.")
-                
+                        latent_info = gr.Textbox(label="Latent Space Info", interactive=False, lines=8)
+                        gr.Markdown("**💡 Tip:** Click on any point in the t-SNE plot to visualize that sample!<br>Or manually enter the sample index (shown in hover tooltip) below.")
+                    
                 # Sample visualization in next row
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -1611,8 +1809,8 @@ def create_interface():
             status, success = app.load_model(checkpoint_path_val)
             return status
         
-        def on_load_dataset(lmdb_dir_val, is_MDM_val):
-            status, total = app.load_dataset(lmdb_dir_val, is_MDM_val)
+        def on_load_dataset(lmdb_dir_val, is_MDM_val, train_relationship_val):
+            status, total = app.load_dataset(lmdb_dir_val, is_MDM_val, train_relationship_val)
             max_val = max(0, int(total) - 1) if total > 0 else 0
             return status, total, gr.update(maximum=max_val, value=0)
         
@@ -1685,7 +1883,7 @@ def create_interface():
         
         load_dataset_btn.click(
             fn=on_load_dataset,
-            inputs=[lmdb_dir, is_MDM],
+            inputs=[lmdb_dir, is_MDM, train_relationship],
             outputs=[dataset_status, total_samples, sample_idx]
         )
         
@@ -2161,6 +2359,84 @@ def create_interface():
             fn=on_generate_combined,
             inputs=[video_idx_input, clip_idx_input, start_frame_input, end_frame_input],
             outputs=[combined_original_video, combined_recon_video, combined_recon_info]
+        )
+        
+        # Relationship Features Visualization Section
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 🔗 Relationship Features Visualization")
+                gr.Markdown("Visualize 4D relationship features (translation + rotation differences) as time series plots. Each plot shows original vs reconstructed for one dimension.")
+                
+                with gr.Row():
+                    rel_sample_idx = gr.Number(
+                        label="Sample Index",
+                        value=0,
+                        minimum=0,
+                        step=1,
+                        precision=0,
+                        info="Index from the relationship features dataset"
+                    )
+                    rel_prev_btn = gr.Button("◀ Previous", size="sm")
+                    rel_next_btn = gr.Button("Next ▶", size="sm")
+                
+                rel_plot = gr.Plot(label="Relationship Features Time Series")
+                rel_info = gr.Textbox(
+                    label="Visualization Info",
+                    interactive=False,
+                    lines=10
+                )
+                
+                visualize_rel_btn = gr.Button("Visualize Relationship Features", variant="primary")
+        
+        def on_visualize_relationship(idx_val):
+            try:
+                idx = int(idx_val) if idx_val is not None else 0
+                plot_fig, info = app.visualize_relationship_features(idx)
+                return plot_fig, info
+            except Exception as e:
+                import traceback
+                error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
+                return None, error_msg
+        
+        def on_rel_prev(idx_val):
+            try:
+                idx = int(idx_val) if idx_val is not None else 0
+                new_idx = max(0, idx - 1)
+                plot_fig, info = app.visualize_relationship_features(new_idx)
+                return new_idx, plot_fig, info
+            except Exception as e:
+                import traceback
+                error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
+                return idx_val, None, error_msg
+        
+        def on_rel_next(idx_val):
+            try:
+                idx = int(idx_val) if idx_val is not None else 0
+                max_idx = len(app.dataloader.dataset) - 1 if app.dataloader else 0
+                new_idx = min(max_idx, idx + 1)
+                plot_fig, info = app.visualize_relationship_features(new_idx)
+                return new_idx, plot_fig, info
+            except Exception as e:
+                import traceback
+                error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
+                return idx_val, None, error_msg
+        
+        visualize_rel_btn.click(
+            fn=on_visualize_relationship,
+            inputs=[rel_sample_idx],
+            outputs=[rel_plot, rel_info]
+        )
+        
+        rel_prev_btn.click(
+            fn=on_rel_prev,
+            inputs=[rel_sample_idx],
+            outputs=[rel_sample_idx, rel_plot, rel_info]
+        )
+        
+        rel_next_btn.click(
+            fn=on_rel_next,
+            inputs=[rel_sample_idx],
+            outputs=[rel_sample_idx, rel_plot, rel_info]
         )
     
     return demo
