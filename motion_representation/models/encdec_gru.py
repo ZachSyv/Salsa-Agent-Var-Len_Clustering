@@ -173,7 +173,7 @@ class GRUDecoder(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim)
         )
-        
+        self.heavy_dropout = nn.Dropout(0.95)
     def forward(self, z, first_frame=None):
         """
         Args:
@@ -196,7 +196,7 @@ class GRUDecoder(nn.Module):
             decoder_input = torch.zeros(batch_size, 1, self.output_dim, device=z.device)
         else:
             decoder_input = first_frame.unsqueeze(1)  # (batch, 1, output_dim)
-        
+        decoder_input = self.heavy_dropout(decoder_input)
         # Apply FC to first frame input
         decoder_input = self.fc_first_frame(decoder_input)  # (batch, 1, hidden_dim)
         

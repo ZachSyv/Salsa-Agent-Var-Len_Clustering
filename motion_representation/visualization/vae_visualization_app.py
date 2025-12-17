@@ -42,6 +42,10 @@ class VAEVisualizationApp:
         self.raw_lmdb_env = None  # Store raw LMDB environment for long sequence loading
         self.raw_lmdb_videos = None  # Store list of videos from raw LMDB
         
+        # Token cluster exploration state (VQ-VAE only)
+        self.code_to_samples = None  # Mapping: code_idx -> list of dataset sample indices
+        self.sample_to_code = None  # Mapping: dataset sample_idx -> code_idx
+        
         # Default paths
         self.default_lmdb_dir = "dataset_processed_New/lmdb_Salsa_pair/lmdb_train"
         self.default_checkpoint_dir = "motion_representation/checkpoints"
@@ -82,7 +86,7 @@ class VAEVisualizationApp:
             
             # Now try to load the checkpoint
             try:
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
             except RuntimeError as e:
                 if "failed reading zip archive" in str(e) or "central directory" in str(e):
                     return f"Error: Checkpoint file is corrupted or incomplete: {checkpoint_path}\n\nError details: {str(e)}\n\nPossible causes:\n- File was not fully written (training interrupted)\n- File was corrupted during transfer\n- Disk space issue during checkpoint saving\n\nPlease check:\n1. File size: {file_size:,} bytes\n2. Try loading 'best_checkpoint.pth' or another checkpoint file\n3. Check if training completed successfully", False
@@ -1646,6 +1650,83 @@ class VAEVisualizationApp:
             error_msg = f"Error visualizing relationship features: {str(e)}\n{traceback.format_exc()}"
             return None, error_msg
 
+    def quantize_samples(self, num_samples: int = 1000) -> Tuple[str, list]:
+        """
+        Quantize a specified number of samples (encode -> nearest code index) and store mapping for exploration.
+        This is used by the "Token Cluster Exploration" section.
+        
+        Returns:
+            (status_message, available_code_indices_sorted)
+        """
+        if self.model is None:
+            return "Error: Model not loaded. Please load a model first.", []
+        
+        if not getattr(self.model, "use_vqvae", False):
+            return "Error: Model is not a VQ-VAE. This feature only works with VQ-VAE models.", []
+        
+        if self.dataloader is None:
+            return "Error: Dataset not loaded. Please load dataset first.", []
+        
+        try:
+            total_samples = len(self.dataloader.dataset)
+            num_samples = int(num_samples) if num_samples is not None else 1000
+            num_samples = max(1, min(num_samples, total_samples))
+            
+            indices = np.random.choice(total_samples, num_samples, replace=False)
+            
+            self.code_to_samples = {}
+            self.sample_to_code = {}
+            
+            self.model.eval()
+            with torch.no_grad():
+                for idx in tqdm(indices, desc="Quantizing samples"):
+                    sample = self.dataloader.dataset[int(idx)]  # (20, input_dim)
+                    sample = sample.unsqueeze(0).to(self.device)  # (1, 20, input_dim)
+                    
+                    encoded = self.model.encoder(sample)  # (1, latent_dim)
+                    code_idx = self.model.vq_layer.quantize(encoded)  # (1,)
+                    code_val = int(code_idx.item())
+                    
+                    self.sample_to_code[int(idx)] = code_val
+                    self.code_to_samples.setdefault(code_val, []).append(int(idx))
+            
+            available_codes = sorted(self.code_to_samples.keys())
+            codebook_size = getattr(self.model.vq_layer, "nb_code", None)
+            if codebook_size is None:
+                codebook_size = getattr(self.model.vq_layer, "n_e", 0)  # fallback for older quantizer variants
+            
+            code_counts = {c: len(self.code_to_samples[c]) for c in available_codes}
+            
+            status = f"Quantized {num_samples} samples.\n"
+            status += f"Found {len(available_codes)} unique code indices.\n"
+            if codebook_size:
+                status += f"Codebook size: {codebook_size}\n"
+                status += f"Coverage: {len(available_codes)}/{codebook_size} codes used ({100*len(available_codes)/max(1, codebook_size):.1f}%)\n\n"
+            status += "Top 10 most used codes:\n"
+            for code, count in sorted(code_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
+                status += f"  Code {code}: {count} samples\n"
+            
+            return status, available_codes
+        except Exception as e:
+            import traceback
+            return f"Error quantizing samples: {str(e)}\n{traceback.format_exc()}", []
+
+    def get_samples_for_code(self, code_idx: int) -> Tuple[list, str]:
+        """
+        Get list of dataset sample indices for a given code index (after quantize_samples()).
+        """
+        if self.code_to_samples is None:
+            return [], "Error: No samples quantized yet. Please click 'Quantize Samples' first."
+        
+        code_idx = int(code_idx)
+        if code_idx not in self.code_to_samples:
+            return [], f"Error: Code index {code_idx} not found in the quantized set."
+        
+        samples = self.code_to_samples[code_idx]
+        info = f"Code {code_idx}: {len(samples)} samples\n"
+        info += f"Sample indices (first 20): {samples[:20]}{'...' if len(samples) > 20 else ''}"
+        return samples, info
+
 
 def create_interface():
     """Create the Gradio interface."""
@@ -2184,6 +2265,198 @@ def create_interface():
             fn=on_analyze_codebook,
             inputs=[num_samples_codebook],
             outputs=[codebook_plot, codebook_info]
+        )
+
+        # Token Cluster Exploration Section (under codebook analysis)
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 🔍 Token Cluster Exploration (VQ-VAE Only)")
+                gr.Markdown(
+                    "Quantize a batch of samples, then pick a **token/code index** and browse samples assigned to it. "
+                    "This helps inspect how well the VQ-VAE codes cluster motions."
+                )
+                
+                with gr.Row():
+                    num_samples_quantize = gr.Number(
+                        label="Number of Samples to Quantize",
+                        value=1000,
+                        minimum=100,
+                        maximum=10000,
+                        step=100,
+                        precision=0,
+                    )
+                    quantize_btn = gr.Button("Quantize Samples", variant="primary")
+                
+                quantize_status = gr.Textbox(label="Quantization Status", interactive=False, lines=8)
+                
+                with gr.Row():
+                    code_idx_dropdown = gr.Dropdown(
+                        label="Select Token/Code Index",
+                        choices=[],
+                        value=None,
+                        interactive=True,
+                        info="Dropdown shows only codes observed in the quantized subset"
+                    )
+                    refresh_codes_btn = gr.Button("🔄 Refresh", size="sm")
+                
+                cluster_info = gr.Textbox(label="Cluster Information", interactive=False, lines=4)
+                
+                with gr.Row():
+                    cluster_sample_pos = gr.Number(
+                        label="Sample Position in Cluster",
+                        value=0,
+                        minimum=0,
+                        step=1,
+                        precision=0,
+                        info="Index within this cluster list (0 = first sample in cluster)"
+                    )
+                    cluster_prev_btn = gr.Button("◀ Previous", size="sm")
+                    cluster_next_btn = gr.Button("Next ▶", size="sm")
+                
+                visualize_cluster_btn = gr.Button("Visualize Sample from Cluster", variant="primary")
+                
+                with gr.Row():
+                    cluster_original_video = gr.Video(label="Original Motion", scale=1)
+                    cluster_reconstructed_video = gr.Video(label="Reconstructed Motion", scale=1)
+                
+                cluster_recon_info = gr.Textbox(label="Reconstruction Info", interactive=False, lines=8)
+        
+        def _parse_code_from_choice(code_choice: str) -> Optional[int]:
+            if code_choice is None:
+                return None
+            s = str(code_choice).strip()
+            if not s:
+                return None
+            # Expected: "Code {idx} ({n} samples)"
+            try:
+                parts = s.split()
+                return int(parts[1])
+            except Exception:
+                try:
+                    return int(s)
+                except Exception:
+                    return None
+        
+        def on_quantize_samples(num_samples_val):
+            try:
+                n = int(num_samples_val) if num_samples_val is not None else 1000
+                status, available_codes = app.quantize_samples(n)
+                
+                if available_codes:
+                    choices = [f"Code {c} ({len(app.code_to_samples[c])} samples)" for c in available_codes]
+                    first_val = choices[0]
+                else:
+                    choices = []
+                    first_val = None
+                
+                # Reset cluster selection state
+                return (
+                    status,
+                    gr.update(choices=choices, value=first_val),
+                    "",
+                    gr.update(value=0, minimum=0, maximum=0),
+                )
+            except Exception as e:
+                import traceback
+                return (
+                    f"Error: {str(e)}\n{traceback.format_exc()}",
+                    gr.update(choices=[], value=None),
+                    "",
+                    gr.update(value=0, minimum=0, maximum=0),
+                )
+        
+        def on_code_selected(code_choice):
+            try:
+                code_idx = _parse_code_from_choice(code_choice)
+                if code_idx is None:
+                    return "", gr.update(value=0, minimum=0, maximum=0)
+                
+                samples, info = app.get_samples_for_code(code_idx)
+                max_pos = max(0, len(samples) - 1)
+                return info, gr.update(value=0, minimum=0, maximum=max_pos)
+            except Exception as e:
+                import traceback
+                return f"Error: {str(e)}\n{traceback.format_exc()}", gr.update(value=0, minimum=0, maximum=0)
+        
+        def on_visualize_cluster_sample(code_choice, cluster_pos_val):
+            try:
+                code_idx = _parse_code_from_choice(code_choice)
+                if code_idx is None:
+                    return None, None, "Error: Please select a code index first."
+                
+                samples, _ = app.get_samples_for_code(code_idx)
+                if not samples:
+                    return None, None, "Error: No samples found for this code."
+                
+                pos = int(cluster_pos_val) if cluster_pos_val is not None else 0
+                pos = max(0, min(pos, len(samples) - 1))
+                sample_idx_val = samples[pos]
+                
+                original, reconstructed, info = app.visualize_reconstruction(sample_idx_val)
+                header = f"Cluster sample {pos}/{len(samples)-1}\nDataset sample index: {sample_idx_val}\nCode: {code_idx}\n\n"
+                return original, reconstructed, header + info
+            except Exception as e:
+                import traceback
+                return None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
+        
+        def on_cluster_navigate(direction, code_choice, cluster_pos_val):
+            try:
+                code_idx = _parse_code_from_choice(code_choice)
+                if code_idx is None:
+                    return gr.update(value=0), None, None, "Error: Please select a code index first."
+                
+                samples, _ = app.get_samples_for_code(code_idx)
+                if not samples:
+                    return gr.update(value=0), None, None, "Error: No samples found for this code."
+                
+                pos = int(cluster_pos_val) if cluster_pos_val is not None else 0
+                if direction == "prev":
+                    pos = max(0, pos - 1)
+                else:
+                    pos = min(len(samples) - 1, pos + 1)
+                
+                sample_idx_val = samples[pos]
+                original, reconstructed, info = app.visualize_reconstruction(sample_idx_val)
+                header = f"Cluster sample {pos}/{len(samples)-1}\nDataset sample index: {sample_idx_val}\nCode: {code_idx}\n\n"
+                return gr.update(value=pos), original, reconstructed, header + info
+            except Exception as e:
+                import traceback
+                return gr.update(value=0), None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
+        
+        quantize_btn.click(
+            fn=on_quantize_samples,
+            inputs=[num_samples_quantize],
+            outputs=[quantize_status, code_idx_dropdown, cluster_info, cluster_sample_pos],
+        )
+        
+        refresh_codes_btn.click(
+            fn=on_quantize_samples,
+            inputs=[num_samples_quantize],
+            outputs=[quantize_status, code_idx_dropdown, cluster_info, cluster_sample_pos],
+        )
+        
+        code_idx_dropdown.change(
+            fn=on_code_selected,
+            inputs=[code_idx_dropdown],
+            outputs=[cluster_info, cluster_sample_pos],
+        )
+        
+        visualize_cluster_btn.click(
+            fn=on_visualize_cluster_sample,
+            inputs=[code_idx_dropdown, cluster_sample_pos],
+            outputs=[cluster_original_video, cluster_reconstructed_video, cluster_recon_info],
+        )
+        
+        cluster_prev_btn.click(
+            fn=lambda c, p: on_cluster_navigate("prev", c, p),
+            inputs=[code_idx_dropdown, cluster_sample_pos],
+            outputs=[cluster_sample_pos, cluster_original_video, cluster_reconstructed_video, cluster_recon_info],
+        )
+        
+        cluster_next_btn.click(
+            fn=lambda c, p: on_cluster_navigate("next", c, p),
+            inputs=[code_idx_dropdown, cluster_sample_pos],
+            outputs=[cluster_sample_pos, cluster_original_video, cluster_reconstructed_video, cluster_recon_info],
         )
         
         # Long Sequence Visualization Section
