@@ -26,6 +26,11 @@ from motion_representation.data.motion_dataset import create_dataloader
 from motion_representation.config import get_config
 
 
+import warnings
+warnings.filterwarnings("ignore")
+
+DEBUG_PRINTS = False
+
 def update_lr_warm_up(optimizer, nb_iter, warm_up_iter, lr):
     """
     Linear warm-up learning rate scheduler.
@@ -100,7 +105,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, writer=None
             continue
         
         # DEBUG: Check input data before forward pass
-        if batch_idx % 100 == 0 or batch_idx == 583:  # Check every 100 batches or at problematic batch
+        if DEBUG_PRINTS and (batch_idx % 100 == 0 or batch_idx == 583):  # Check every 100 batches or at problematic batch
             print(f"\n[DEBUG] Batch {batch_idx} - Input Data Check:")
             print(f"  motion shape: {motion.shape}")
             print(f"  motion stats: min={motion.min().item():.4f}, max={motion.max().item():.4f}, mean={motion.mean().item():.4f}, std={motion.std().item():.4f}")
@@ -128,7 +133,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, writer=None
                     model.encoder._debug_mode = False
                 
                 # DEBUG: Check model outputs (autocast path)
-                if batch_idx % 100 == 0 or batch_idx == 583:
+                if DEBUG_PRINTS and (batch_idx % 100 == 0 or batch_idx == 583):
                     print(f"\n[DEBUG] Batch {batch_idx} - Model Output Check (AMP):")
                     print(f"  recon_motion shape: {recon_motion.shape}")
                     print(f"  recon_motion stats: min={recon_motion.min().item():.4f}, max={recon_motion.max().item():.4f}, mean={recon_motion.mean().item():.4f}, std={recon_motion.std().item():.4f}")
@@ -167,7 +172,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, writer=None
                 )
                 
                 # DEBUG: Check loss values (autocast path)
-                if batch_idx % 100 == 0 or batch_idx == 583:
+                if DEBUG_PRINTS and (batch_idx % 100 == 0 or batch_idx == 583):
                     print(f"\n[DEBUG] Batch {batch_idx} - Loss Check (AMP):")
                     print(f"  total_loss: {loss.item():.6f}, has NaN: {torch.isnan(loss).item()}, has Inf: {torch.isinf(loss).item()}")
                     print(f"  recon_loss: {recon_loss.item():.6f}, has NaN: {torch.isnan(recon_loss).item()}, has Inf: {torch.isinf(recon_loss).item()}")
@@ -175,7 +180,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, writer=None
                     print(f"  vel_loss: {vel_loss.item():.6f}, has NaN: {torch.isnan(vel_loss).item()}, has Inf: {torch.isinf(vel_loss).item()}")
         else:
             # DEBUG: Check input data before forward pass
-            if batch_idx % 100 == 0 or batch_idx == 583:  # Check every 100 batches or at problematic batch
+            if DEBUG_PRINTS and (batch_idx % 100 == 0 or batch_idx == 583):  # Check every 100 batches or at problematic batch
                 print(f"\n[DEBUG] Batch {batch_idx} - Input Data Check:")
                 print(f"  motion shape: {motion.shape}")
                 print(f"  motion stats: min={motion.min().item():.4f}, max={motion.max().item():.4f}, mean={motion.mean().item():.4f}, std={motion.std().item():.4f}")
@@ -256,7 +261,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, writer=None
         # Update weights every accumulation_steps batches
         if (batch_idx + 1) % accumulation_steps == 0:
             # DEBUG: Check gradients before clipping
-            if batch_idx % 100 == 0 or batch_idx == 583:
+            if DEBUG_PRINTS and (batch_idx % 100 == 0 or batch_idx == 583):
                 print(f"\n[DEBUG] Batch {batch_idx} - Gradient Check (before clipping):")
                 grad_stats = {}
                 for name, param in model.named_parameters():
