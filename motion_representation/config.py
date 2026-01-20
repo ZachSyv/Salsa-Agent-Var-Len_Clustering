@@ -100,14 +100,15 @@ def get_config():
     # Data parameters
     parser.add_argument('--window_size', type=int, default=20,
                         help='Size of motion window')
-    parser.add_argument('--stride', type=int, default=10,
+    parser.add_argument('--stride', type=int, default=5,
                         help='Stride for window sampling')
     parser.add_argument('--use_both_roles', action='store_true', default=True,
                         help='Use both leader and follower motions (joint training)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loader workers')
-    parser.add_argument('--train_relationship', action='store_true', default=False,
-                        help='Train on relationship features between leader and follower (instead of individual motions)')
+    parser.add_argument('--representation_type', type=str, default='humanml3d',
+                        choices=['humanml3d', 'interhuman', 'relationship'],
+                        help='Type of motion representation: humanml3d (263 dims), interhuman (262 dims), or relationship (4 dims: [w, z, x, z])')
     
     # Checkpoint and logging
     parser.add_argument('--checkpoint_dir', type=str,
@@ -117,7 +118,7 @@ def get_config():
                         help='Model name suffix (e.g., "Vanilla_GRU"). Will be appended to checkpoint_dir')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to specific checkpoint to resume from. If not specified, automatically finds latest checkpoint in checkpoint_dir')
-    parser.add_argument('--save_every', type=int, default=1,
+    parser.add_argument('--save_every', type=int, default=100,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--log_every', type=int, default=100,
                         help='Log training progress every N iterations')

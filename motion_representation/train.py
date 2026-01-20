@@ -723,17 +723,22 @@ def main():
     device = torch.device(config.device if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Check if training relationship features
-    train_relationship = getattr(config, 'train_relationship', False)
-    if train_relationship:
-        print("="*60)
-        print("TRAINING RELATIONSHIP VQ-VAE")
-        print("="*60)
-        # Override input_dim for relationship features (4 dims: 3 translation + 1 rotation)
-        config.input_dim = 4
-        print(f"Using relationship features: input_dim={config.input_dim}")
+    # Set input_dim and seq_len based on representation_type
+    representation_type = getattr(config, 'representation_type', 'humanml3d')
+    if representation_type == 'humanml3d':
+        config.input_dim = 263
+        config.seq_len = 20  # window_size
+        print(f"Using HumanML3D representation: input_dim={config.input_dim}, seq_len={config.seq_len}")
+    elif representation_type == 'interhuman':
+        config.input_dim = 262
+        config.seq_len = 19  # window_size - 1 (process_motion_interhuman reduces by 1)
+        print(f"Using InterHuman representation: input_dim={config.input_dim}, seq_len={config.seq_len}")
+    elif representation_type == 'relationship':
+        config.input_dim = 4  # [w, z, x, z] - quaternion components [w, z] + position [x, z]
+        config.seq_len = 19  # window_size - 1 (extracted from InterHuman)
+        print(f"Using relationship features: input_dim={config.input_dim}, seq_len={config.seq_len}")
     else:
-        print(f"Using individual motion features: input_dim={config.input_dim}")
+        raise ValueError(f"Unknown representation_type: {representation_type}")
     
     # Create data loaders
     print("Loading dataset...")
@@ -747,7 +752,7 @@ def main():
         num_workers=config.num_workers,
         use_both_roles=config.use_both_roles,
         normalize=True,  # Use normalized data (default, recommended for training)
-        train_relationship=train_relationship,
+        representation_type=representation_type,
     )
     
     print(f"Dataset size: {len(train_loader.dataset)} samples")

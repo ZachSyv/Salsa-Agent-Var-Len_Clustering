@@ -217,6 +217,75 @@ python -m motion_representation.train \
     --model_name VQVAE_GRU_reset
 ```
 
+#### VQ-VAE with GRU on InterHuman (Canonicalized Motion) - Recommended for Motion Tokenizer
+
+This configuration trains on canonicalized motion representation (262 dims), treating leader and follower motions uniformly. This is ideal for training a motion tokenizer that works regardless of role:
+
+```bash
+python -m motion_representation.train \
+    --encoder_type gru \
+    --decoder_type gru \
+    --latent_dim 512 \
+    --hidden_dim 512 \
+    --num_layers 2 \
+    --batch_size 2048 \
+    --learning_rate 1e-4 \
+    --num_epochs 2000 \
+    --use_vqvae \
+    --nb_code 512 \
+    --quantizer ema_reset \
+    --vq_mu 0.95 \
+    --commit_weight 0.02 \
+    --loss_vel_weight 0.1 \
+    --warm_up_epochs 5 \
+    --lr_scheduler_gamma 0.05 \
+    --representation_type interhuman \
+    --use_both_roles \
+    --model_name VQVAE_GRU_InterHuman
+```
+
+**Key features:**
+- **`--representation_type interhuman`**: Uses canonicalized motion (262 dims, seq_len=19)
+- **`--use_both_roles`**: Trains on both leader and follower motions (treats them as equivalent canonicalized motions)
+- Large batch size (2048) for stable training
+- Optimized hyperparameters for VQ-VAE codebook learning
+- Checkpoints saved to: `motion_representation/checkpoints_VQVAE_GRU_InterHuman/`
+
+#### VQ-VAE with GRU on Relationship Features (Relationship Tokenizer)
+
+This configuration trains on relationship features (4 dims: [w, z, x, z]) representing the relative transformation between two dancers. This is ideal for training a relationship tokenizer with a compact model:
+
+```bash
+python -m motion_representation.train \
+    --encoder_type gru \
+    --decoder_type gru \
+    --latent_dim 32 \
+    --hidden_dim 32 \
+    --num_layers 2 \
+    --batch_size 2048 \
+    --learning_rate 1e-4 \
+    --num_epochs 200 \
+    --use_vqvae \
+    --nb_code 512 \
+    --quantizer ema_reset \
+    --vq_mu 0.95 \
+    --commit_weight 0.02 \
+    --loss_vel_weight 0.1 \
+    --warm_up_epochs 5 \
+    --lr_scheduler_gamma 0.05 \
+    --representation_type relationship \
+    --use_both_roles \
+    --model_name VQVAE_GRU_Relationship
+```
+
+**Key features:**
+- **`--representation_type relationship`**: Uses relationship features (4 dims: [w, z, x, z], seq_len=19)
+- **`--hidden_dim 32`**: Compact model suitable for 4-dimensional relationship features
+- **`--latent_dim 32`**: Smaller latent dimension matching hidden_dim
+- **`--use_both_roles`**: Trains on both leader and follower relationship features
+- Large batch size (2048) for stable training
+- Checkpoints saved to: `motion_representation/checkpoints_VQVAE_GRU_Relationship/`
+
 #### Resuming Training
 
 The training script automatically detects and resumes from the latest checkpoint in the checkpoint directory. Epoch numbering continues from where it left off.

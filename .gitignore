@@ -184,3 +184,4 @@ wandb/
 *.pk
 *.pklutils/salsa_utils/libs/MotionScript/data/smplh.tar.xz
 *.tar.xz
+\checkpoints

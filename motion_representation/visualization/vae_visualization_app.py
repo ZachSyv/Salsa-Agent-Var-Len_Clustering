@@ -16,6 +16,18 @@ from tqdm import tqdm
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+# Add in2IN library path for InterHuman representation support
+# in2IN is located at: /localhome/pjomeyaz/Payam_Files/Projects/Salsa_Dance/scripts/New_2025/Download/in2IN
+# It's one level up from project_root (Salsa-Agent)
+in2in_path = project_root.parent / "Download" / "in2IN"
+if in2in_path.exists():
+    sys.path.insert(0, str(in2in_path))
+else:
+    # Fallback: try absolute path
+    in2in_abs_path = Path("/localhome/pjomeyaz/Payam_Files/Projects/Salsa_Dance/scripts/New_2025/Download/in2IN")
+    if in2in_abs_path.exists():
+        sys.path.insert(0, str(in2in_abs_path))
+
 from motion_representation.models import MotionModel
 # Backward compatibility
 MotionVAE = MotionModel
@@ -23,6 +35,20 @@ from motion_representation.data.motion_dataset import create_dataloader
 from utils.motion_utils import recover_from_ric, plot_3d_motion
 from utils.paramUtil import t2m_kinematic_chain
 from visualization.visualization_utils import render_combined_skeletons
+
+# ============================================================================
+# InterHuman representation support (in2IN library)
+# ============================================================================
+# Import in2IN functions for InterHuman visualization
+# These are used when representation_type='interhuman'
+try:
+    from in2in.utils.plot import plot_3d_motion as plot_3d_motion_interhuman
+    from in2in.utils.paramUtil import HML_KINEMATIC_CHAIN
+    IN2IN_AVAILABLE = True
+except ImportError as e:
+    IN2IN_AVAILABLE = False
+    print(f"Warning: in2IN library not available. InterHuman visualization will not work. Error: {e}")
+    print(f"  Tried paths: {in2in_path}, {in2in_abs_path if 'in2in_abs_path' in locals() else 'N/A'}")
 
 
 class VAEVisualizationApp:
@@ -35,6 +61,7 @@ class VAEVisualizationApp:
         self.temp_dir = tempfile.mkdtemp()
         self.current_idx = 0
         self.config = None
+        self.representation_type = 'humanml3d'  # Default representation type
         self.tsne_indices = None  # Store indices for t-SNE plot points
         self.tsne_coords = None  # Store t-SNE coordinates
         self.heatmap_hist = None  # Store histogram data for heatmap regeneration
@@ -93,6 +120,25 @@ class VAEVisualizationApp:
                 else:
                     raise  # Re-raise if it's a different RuntimeError
             self.config = checkpoint['config']
+            
+            # Detect representation type from config or infer from input_dim
+            self.representation_type = self.config.get('representation_type', None)
+            if self.representation_type is None:
+                # Infer from input_dim
+                input_dim = self.config.get('input_dim', 263)
+                if input_dim == 263:
+                    self.representation_type = 'humanml3d'
+                elif input_dim == 262:
+                    self.representation_type = 'interhuman'
+                elif input_dim == 4:
+                    self.representation_type = 'relationship'  # [w, z, x, z] - quaternion components + position
+                elif input_dim == 3:
+                    # Legacy support for old relationship models (should be migrated to 4D)
+                    self.representation_type = 'relationship'
+                    print(f"Warning: input_dim=3 detected. Relationship features should use input_dim=4 (quaternion components).")
+                else:
+                    self.representation_type = 'humanml3d'  # Default fallback
+                    print(f"Warning: Unknown input_dim {input_dim}, defaulting to 'humanml3d'")
             
             self.model = MotionModel(
                 input_dim=self.config['input_dim'],
@@ -154,6 +200,7 @@ class VAEVisualizationApp:
             config_str += f"  Decoder: {self.config.get('decoder_type', 'gru')}\n"
             config_str += f"  Use VAE: {self.config.get('use_vae', False)}\n"
             config_str += f"  Use VQ-VAE: {self.config.get('use_vqvae', False)}\n"
+            config_str += f"  Representation Type: {self.representation_type}\n"
             config_str += f"  Input Dim: {self.config.get('input_dim', 263)}\n"
             config_str += f"  Hidden Dim: {self.config.get('hidden_dim', 512)}\n"
             config_str += f"  Num Layers: {self.config.get('num_layers', 2)}\n"
@@ -202,6 +249,7 @@ class VAEVisualizationApp:
             lmdb_dir: Path to LMDB directory
             is_MDM: Whether data is in MDM format
             train_relationship: If True, load relationship features (4D) instead of motions (263D)
+                                (Deprecated: use representation_type from model instead)
             
         Returns:
             Status message and total samples
@@ -209,6 +257,30 @@ class VAEVisualizationApp:
         try:
             if not os.path.exists(lmdb_dir):
                 return f"Error: LMDB path does not exist: {lmdb_dir}", 0
+            
+            # Use representation_type from model if available, otherwise infer from train_relationship or model's input_dim
+            if self.model is not None and hasattr(self, 'representation_type') and self.representation_type:
+                representation_type = self.representation_type
+            elif train_relationship:
+                representation_type = 'relationship'
+            elif self.model is not None and hasattr(self.model, 'input_dim'):
+                # Infer from model's input_dim as fallback
+                input_dim = self.model.input_dim
+                if input_dim == 263:
+                    representation_type = 'humanml3d'
+                elif input_dim == 262:
+                    representation_type = 'interhuman'
+                elif input_dim == 4:
+                    representation_type = 'relationship'  # [w, z, x, z]
+                elif input_dim == 3:
+                    # Legacy support for old relationship models (should be migrated to 4D)
+                    representation_type = 'relationship'
+                    print(f"Warning: Detected input_dim=3. Relationship features now use input_dim=4 (quaternion components).")
+                else:
+                    representation_type = 'humanml3d'  # Default fallback
+                    print(f"Warning: Unknown input_dim {input_dim}, defaulting to 'humanml3d'")
+            else:
+                representation_type = 'humanml3d'  # Default
             
             # Create args object
             class DataLoaderArgs:
@@ -228,11 +300,28 @@ class VAEVisualizationApp:
                 num_workers=2,
                 use_both_roles=True,
                 normalize=True,  # Use normalized data (default)
-                train_relationship=train_relationship,  # Support relationship features
+                representation_type=representation_type,  # Use representation_type from model
             )
             
             total_samples = len(self.dataloader.dataset)
+            
+            # Verify that the dataloader is using the correct representation_type
+            if hasattr(self.dataloader.dataset, 'representation_type'):
+                actual_rep_type = self.dataloader.dataset.representation_type
+                if actual_rep_type != representation_type:
+                    print(f"Warning: Representation type mismatch! Requested: {representation_type}, Actual: {actual_rep_type}")
+            
+            # Also verify feature_dim matches
+            if hasattr(self.dataloader.dataset, 'feature_dim'):
+                actual_feature_dim = self.dataloader.dataset.feature_dim
+                expected_feature_dim = {'humanml3d': 263, 'interhuman': 262, 'relationship': 4}.get(representation_type, 263)
+                if actual_feature_dim != expected_feature_dim:
+                    print(f"Warning: Feature dimension mismatch! Expected: {expected_feature_dim} for {representation_type}, Actual: {actual_feature_dim}")
+            
             status = f"Dataset loaded successfully!\n"
+            status += f"Representation Type: {representation_type}\n"
+            if hasattr(self.dataloader.dataset, 'feature_dim'):
+                status += f"Feature Dim: {self.dataloader.dataset.feature_dim}\n"
             status += f"Total samples: {total_samples}\n"
             status += f"LMDB: {lmdb_dir}"
             
@@ -269,6 +358,89 @@ class VAEVisualizationApp:
             motion_denorm = motion * dataset.std.numpy()[None, None, :] + dataset.mean.numpy()[None, None, :]
         
         return motion_denorm
+    
+    def _extract_keypoints_from_motion(self, motion: np.ndarray) -> np.ndarray:
+        """
+        Extract 3D keypoints from motion based on representation type.
+        
+        Args:
+            motion: Denormalized motion array
+                  - HumanML3D: (seq_len, 263)
+                  - InterHuman: (seq_len, 262) where seq_len is typically 19
+                  - Relationship: (seq_len, 4) - not supported for 3D visualization
+        
+        Returns:
+            keypoints: (seq_len, 22, 3) numpy array of 3D joint positions
+        """
+        if self.representation_type == 'humanml3d':
+            # Use existing recover_from_ric for HumanML3D
+            keypoints = recover_from_ric(
+                torch.from_numpy(motion).float().to(self.device),
+                22
+            ).cpu().numpy()
+        elif self.representation_type == 'interhuman':
+            # InterHuman: first 66 dims (22*3) contain joint positions
+            # motion shape is (seq_len, 262)
+            seq_len = motion.shape[0]
+            # Extract first 66 dimensions and reshape to (seq_len, 22, 3)
+            keypoints = motion[:, :66].reshape(seq_len, 22, 3)
+        elif self.representation_type == 'relationship':
+            # Relationship features cannot be converted to 3D keypoints
+            raise ValueError("Relationship features (4D) cannot be visualized as 3D keypoints. Use time series plots instead.")
+        else:
+            raise ValueError(f"Unknown representation type: {self.representation_type}")
+        
+        return keypoints
+    
+    def _get_kinematic_chain(self):
+        """Get the appropriate kinematic chain for visualization based on representation type."""
+        if self.representation_type == 'humanml3d':
+            return t2m_kinematic_chain
+        elif self.representation_type == 'interhuman':
+            if not IN2IN_AVAILABLE:
+                raise ImportError("in2IN library is required for InterHuman visualization. Please install it.")
+            return HML_KINEMATIC_CHAIN
+        else:
+            raise ValueError(f"Unknown representation type: {self.representation_type}")
+    
+    def _plot_3d_motion(self, save_path: str, kinematic_chain, keypoints: np.ndarray, 
+                       title: str, fps: int = 20, radius: int = 4):
+        """
+        Plot 3D motion using the appropriate visualization function based on representation type.
+        
+        Args:
+            save_path: Path to save the video
+            kinematic_chain: Kinematic chain for skeleton structure
+            keypoints: (seq_len, 22, 3) numpy array of 3D joint positions
+            title: Title for the visualization
+            fps: Frames per second
+            radius: Visualization radius
+        """
+        if self.representation_type == 'humanml3d':
+            # Use existing plot_3d_motion for HumanML3D
+            plot_3d_motion(
+                save_path,
+                kinematic_chain,
+                keypoints,
+                title=title,
+                fps=fps,
+                radius=radius
+            )
+        elif self.representation_type == 'interhuman':
+            # Use in2IN's plot_3d_motion for InterHuman
+            if not IN2IN_AVAILABLE:
+                raise ImportError("in2IN library is required for InterHuman visualization. Please install it.")
+            # in2IN's plot_3d_motion expects mp_joints as a list
+            plot_3d_motion_interhuman(
+                save_path=save_path,
+                kinematic_tree=kinematic_chain,
+                mp_joints=[keypoints],  # List of (seq_len, 22, 3) arrays
+                title=title,
+                fps=fps,
+                radius=radius
+            )
+        else:
+            raise ValueError(f"Unknown representation type: {self.representation_type}")
     
     def visualize_reconstruction(self, idx: int) -> Tuple[Optional[str], Optional[str], str]:
         """
@@ -312,40 +484,36 @@ class VAEVisualizationApp:
             reconstructed = recon_motion[0].cpu().numpy()  # (20, 263) - normalized
             
             # Denormalize before computing metrics and visualization
-            original_denorm = self._denormalize_motion(original)  # (20, 263)
-            reconstructed_denorm = self._denormalize_motion(reconstructed)  # (20, 263)
+            original_denorm = self._denormalize_motion(original)  # (seq_len, input_dim)
+            reconstructed_denorm = self._denormalize_motion(reconstructed)  # (seq_len, input_dim)
             
             # Compute metrics on denormalized data (more meaningful)
             mse = np.mean((original_denorm - reconstructed_denorm) ** 2)
             mae = np.mean(np.abs(original_denorm - reconstructed_denorm))
             
             # Convert to 3D keypoints (use denormalized data)
-            original_keypoints = recover_from_ric(
-                torch.from_numpy(original_denorm).float().to(self.device),
-                22
-            ).cpu().numpy()
+            original_keypoints = self._extract_keypoints_from_motion(original_denorm)
+            reconstructed_keypoints = self._extract_keypoints_from_motion(reconstructed_denorm)
             
-            reconstructed_keypoints = recover_from_ric(
-                torch.from_numpy(reconstructed_denorm).float().to(self.device),
-                22
-            ).cpu().numpy()
+            # Get appropriate kinematic chain
+            kinematic_chain = self._get_kinematic_chain()
             
             # Create videos
             original_path = os.path.join(self.temp_dir, f"original_vae_{idx}.mp4")
             reconstructed_path = os.path.join(self.temp_dir, f"reconstructed_vae_{idx}.mp4")
             
-            plot_3d_motion(
+            self._plot_3d_motion(
                 original_path,
-                t2m_kinematic_chain,
+                kinematic_chain,
                 original_keypoints,
                 title=f"Original (Sample {idx})",
                 fps=20,
                 radius=4
             )
             
-            plot_3d_motion(
+            self._plot_3d_motion(
                 reconstructed_path,
-                t2m_kinematic_chain,
+                kinematic_chain,
                 reconstructed_keypoints,
                 title=f"Reconstructed (MSE: {mse:.4f})",
                 fps=20,
@@ -1264,32 +1432,28 @@ class VAEVisualizationApp:
             mae = np.mean(np.abs(original_denorm - generated_denorm))
             
             # Convert to 3D keypoints
-            original_keypoints = recover_from_ric(
-                torch.from_numpy(original_denorm).float().to(self.device),
-                22
-            ).cpu().numpy()
+            original_keypoints = self._extract_keypoints_from_motion(original_denorm)
+            generated_keypoints = self._extract_keypoints_from_motion(generated_denorm)
             
-            generated_keypoints = recover_from_ric(
-                torch.from_numpy(generated_denorm).float().to(self.device),
-                22
-            ).cpu().numpy()
+            # Get appropriate kinematic chain
+            kinematic_chain = self._get_kinematic_chain()
             
             # Create videos
             original_path = os.path.join(self.temp_dir, f"long_original_{video_idx}_{clip_idx}_{role}.mp4")
             generated_path = os.path.join(self.temp_dir, f"long_generated_{video_idx}_{clip_idx}_{role}.mp4")
             
-            plot_3d_motion(
+            self._plot_3d_motion(
                 original_path,
-                t2m_kinematic_chain,
+                kinematic_chain,
                 original_keypoints,
                 title=f"Original Long Sequence ({seq_len} frames)",
                 fps=20,
                 radius=4
             )
             
-            plot_3d_motion(
+            self._plot_3d_motion(
                 generated_path,
-                t2m_kinematic_chain,
+                kinematic_chain,
                 generated_keypoints,
                 title=f"Generated Long Sequence (MSE: {mse:.4f})",
                 fps=20,
@@ -1425,25 +1589,10 @@ class VAEVisualizationApp:
             follower_recon_denorm = self._denormalize_motion(follower_recon_np)
             
             # Convert to 3D keypoints
-            leader_original_kp = recover_from_ric(
-                torch.from_numpy(leader_original_denorm).float().to(self.device),
-                22
-            ).cpu().numpy()
-            
-            follower_original_kp = recover_from_ric(
-                torch.from_numpy(follower_original_denorm).float().to(self.device),
-                22
-            ).cpu().numpy()
-            
-            leader_recon_kp = recover_from_ric(
-                torch.from_numpy(leader_recon_denorm).float().to(self.device),
-                22
-            ).cpu().numpy()
-            
-            follower_recon_kp = recover_from_ric(
-                torch.from_numpy(follower_recon_denorm).float().to(self.device),
-                22
-            ).cpu().numpy()
+            leader_original_kp = self._extract_keypoints_from_motion(leader_original_denorm)
+            follower_original_kp = self._extract_keypoints_from_motion(follower_original_denorm)
+            leader_recon_kp = self._extract_keypoints_from_motion(leader_recon_denorm)
+            follower_recon_kp = self._extract_keypoints_from_motion(follower_recon_denorm)
             
             # Create combined videos
             original_combined_path = os.path.join(self.temp_dir, f"combined_original_{video_idx}_{clip_idx}.mp4")
@@ -1506,14 +1655,41 @@ class VAEVisualizationApp:
             if idx < 0 or idx >= len(self.dataloader.dataset):
                 return None, f"Error: Index {idx} out of range (0-{len(self.dataloader.dataset)-1})"
             
-            # Get sample (already normalized if dataset.normalize=True)
-            # For relationship features, shape is (20, 4)
-            features = self.dataloader.dataset[idx]  # (20, 4) or (20, 263)
+            dataset = self.dataloader.dataset
+            # Get relationship features - check if dataset has get_pair_data (InterHuman datasets)
+            used_pair_data = False
+            rel_mean_np = None
+            rel_std_np = None
+            epsilon = getattr(dataset, 'epsilon', 1e-8)
             
-            # Validate that we're working with relationship features (4D)
-            if features.shape[1] != 4:
-                return None, f"Error: Expected 4D relationship features, but got shape {features.shape}. Please ensure you loaded the dataset with 'Load Relationship Features' checked."
-            features = features.unsqueeze(0).to(self.device)  # (1, 20, 4)
+            if hasattr(dataset, 'get_pair_data') and dataset.representation_type == 'interhuman':
+                # For interhuman datasets with use_both_roles=True, map dataset idx to pair idx
+                pair_idx = idx // 2 if (dataset.representation_type == 'interhuman' and dataset.use_both_roles) else idx
+                pair_data = dataset.get_pair_data(pair_idx)
+                features = torch.from_numpy(pair_data['relationship_features'].copy()).float()  # (19, 4)
+                used_pair_data = True
+                
+                # Load relationship normalization stats if needed
+                if dataset.normalize:
+                    import pickle
+                    import os
+                    cache_dir = dataset.cache_dir
+                    rel_stats_path = os.path.join(cache_dir, 'normalization_stats_relationship.pkl')
+                    if os.path.exists(rel_stats_path):
+                        with open(rel_stats_path, 'rb') as f:
+                            rel_stats = pickle.load(f)
+                            rel_mean_np = rel_stats['mean']  # numpy (4,)
+                            rel_std_np = rel_stats['std']  # numpy (4,)
+                            rel_mean = torch.from_numpy(rel_mean_np).float()
+                            rel_std = torch.from_numpy(rel_std_np).float()
+                            features = (features - rel_mean) / (rel_std + epsilon)
+            else:
+                # Direct access (dataset is relationship type)
+                features = dataset[idx]  # (19, 4) for relationship features
+                if features.shape[1] != 4:
+                    return None, f"Error: Expected 4D relationship features, but got shape {features.shape}. Please ensure you loaded the dataset with representation_type='relationship' or 'interhuman'."
+            
+            features = features.unsqueeze(0).to(self.device)  # (1, 19, 4)
             
             # Reconstruct - handle different model types
             with torch.no_grad():
@@ -1529,58 +1705,71 @@ class VAEVisualizationApp:
                     recon_features, mean, logvar, z = forward_result
             
             # Convert to numpy
-            original = features[0].cpu().numpy()  # (20, 4) - normalized
-            reconstructed = recon_features[0].cpu().numpy()  # (20, 4) - normalized
+            original = features[0].cpu().numpy()  # (19, 4) - normalized [w, z, x, z]
+            reconstructed = recon_features[0].cpu().numpy()  # (19, 4) - normalized [w, z, x, z]
             
             # Denormalize if needed
-            if self.dataloader.dataset.normalize and self.dataloader.dataset.mean is not None:
+            if used_pair_data and rel_mean_np is not None and rel_std_np is not None:
+                # Use relationship stats for denormalization
+                original_denorm = original * rel_std_np + rel_mean_np
+                reconstructed_denorm = reconstructed * rel_std_np + rel_mean_np
+            elif self.dataloader.dataset.normalize and self.dataloader.dataset.mean is not None:
                 original_denorm = self._denormalize_motion(original)
                 reconstructed_denorm = self._denormalize_motion(reconstructed)
             else:
                 original_denorm = original
                 reconstructed_denorm = reconstructed
             
+            # Convert quaternion components [w, z] to radians for visualization (only for plotting)
+            # Extract [w, z] components (first 2 dims) and convert to angle: yaw = arctan2(z, w)
+            original_yaw = np.arctan2(original_denorm[:, 1], original_denorm[:, 0])  # (19,)
+            reconstructed_yaw = np.arctan2(reconstructed_denorm[:, 1], reconstructed_denorm[:, 0])  # (19,)
+            
+            # Stack converted features: [yaw_radians, x, z] for visualization
+            original_viz = np.stack([original_yaw, original_denorm[:, 2], original_denorm[:, 3]], axis=1)  # (19, 3)
+            reconstructed_viz = np.stack([reconstructed_yaw, reconstructed_denorm[:, 2], reconstructed_denorm[:, 3]], axis=1)  # (19, 3)
+            
             # Compute metrics for each dimension
+            # Relationship features are 4D: [w, z, x, z] - converted to [yaw_rad, x, z] for visualization
             dim_names = [
-                "Root Translation X (leader_x - follower_x)",
-                "Root Translation Z (leader_z - follower_z)",
-                "Root Translation Y/Height (leader_y - follower_y)",
-                "Root Rotation Difference (leader_rot - follower_rot)"
+                "Relative Yaw (rotation difference in radians)",
+                "Relative X Position (follower_x - leader_x in shared space)",
+                "Relative Z Position (follower_z - leader_z in shared space)"
             ]
             
-            dim_short_names = ["Trans X", "Trans Z", "Trans Y", "Rotation"]
+            dim_short_names = ["Yaw", "X", "Z"]
             
             metrics = []
-            for dim in range(4):
-                mse = np.mean((original_denorm[:, dim] - reconstructed_denorm[:, dim]) ** 2)
-                mae = np.mean(np.abs(original_denorm[:, dim] - reconstructed_denorm[:, dim]))
+            for dim in range(3):
+                mse = np.mean((original_viz[:, dim] - reconstructed_viz[:, dim]) ** 2)
+                mae = np.mean(np.abs(original_viz[:, dim] - reconstructed_viz[:, dim]))
                 metrics.append((mse, mae))
             
             # Create time series plots using plotly
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
             
-            # Create subplots: 2x2 grid
+            # Create subplots: 1x3 grid (3 plots horizontally)
             fig = make_subplots(
-                rows=2, cols=2,
+                rows=1, cols=3,
                 subplot_titles=dim_names,
-                vertical_spacing=0.12,
                 horizontal_spacing=0.12
             )
             
-            # Time axis (frames 0-19)
-            time_axis = np.arange(20)
+            # Time axis (frames 0-18, since InterHuman reduces length by 1)
+            seq_len = original_viz.shape[0]
+            time_axis = np.arange(seq_len)
             
             # Plot each dimension
-            for dim in range(4):
-                row = (dim // 2) + 1
-                col = (dim % 2) + 1
+            for dim in range(3):
+                row = 1
+                col = dim + 1
                 
                 # Original (ground truth) - blue line
                 fig.add_trace(
                     go.Scatter(
                         x=time_axis,
-                        y=original_denorm[:, dim],
+                        y=original_viz[:, dim],
                         mode='lines+markers',
                         name='Original',
                         line=dict(color='blue', width=2),
@@ -1594,7 +1783,7 @@ class VAEVisualizationApp:
                 fig.add_trace(
                     go.Scatter(
                         x=time_axis,
-                        y=reconstructed_denorm[:, dim],
+                        y=reconstructed_viz[:, dim],
                         mode='lines+markers',
                         name='Reconstructed',
                         line=dict(color='red', width=2, dash='dash'),
@@ -1624,9 +1813,10 @@ class VAEVisualizationApp:
             
             # Update layout
             fig.update_layout(
-                height=800,
-                title_text="Relationship Features: Original vs Reconstructed",
+                height=400,
+                title_text="Relationship Features: Original vs Reconstructed (InterHuman)",
                 title_x=0.5,
+                title_font=dict(size=16),
                 showlegend=True,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
@@ -1635,10 +1825,12 @@ class VAEVisualizationApp:
             info = f"Relationship Features Visualization\n"
             info += f"{'='*60}\n"
             info += f"Sample Index: {idx}\n"
-            info += f"Window Size: 20 frames\n"
-            info += f"Feature Dimensions: 4\n\n"
+            info += f"Sequence Length: {seq_len} frames (InterHuman reduces window_size by 1)\n"
+            info += f"Feature Dimensions: 4 [w, z, x, z] (converted to [yaw_rad, x, z] for visualization)\n"
+            info += f"Representation: InterHuman canonical frames\n"
+            info += f"Note: Quaternion components [w, z] converted to radians for visualization only\n\n"
             info += f"Error Metrics:\n"
-            for dim in range(4):
+            for dim in range(3):
                 mse, mae = metrics[dim]
                 info += f"  {dim_short_names[dim]}: MSE={mse:.6f}, MAE={mae:.6f}\n"
             info += f"\nModel: {'VQ-VAE' if self.model.use_vqvae else 'VAE' if self.model.use_vae else 'Vanilla AE'}"
@@ -1649,6 +1841,384 @@ class VAEVisualizationApp:
             import traceback
             error_msg = f"Error visualizing relationship features: {str(e)}\n{traceback.format_exc()}"
             return None, error_msg
+
+    def visualize_combined_reconstruction(
+        self, 
+        motion_model_path: str,
+        relationship_model_path: str,
+        idx: int
+    ) -> Tuple[Optional[str], Optional[str], str]:
+        """
+        Visualize combined reconstruction using both motion and relationship networks.
+        
+        This method:
+        1. Loads two models: motion network (InterHuman) and relationship network
+        2. Reconstructs leader and follower canonicalized motions separately
+        3. Reconstructs relationship features
+        4. Combines them using rigid_transform to move follower into leader's space
+        5. Visualizes GT vs reconstructed side-by-side
+        
+        Args:
+            motion_model_path: Path to motion model checkpoint (InterHuman representation)
+            relationship_model_path: Path to relationship model checkpoint
+            idx: Sample index from dataset
+        
+        Returns:
+            Tuple of (gt_video_path, recon_video_path, info_string)
+        """
+        try:
+            # Check if dataset is loaded and supports pair data
+            if self.dataloader is None:
+                return None, None, "Error: Dataset not loaded. Please load dataset first."
+            
+            dataset = self.dataloader.dataset
+            if not hasattr(dataset, 'get_pair_data'):
+                return None, None, "Error: Dataset does not support get_pair_data. Please use InterHuman or relationship representation_type."
+            
+            if idx < 0 or idx >= len(dataset):
+                return None, None, f"Error: Index {idx} out of range (0-{len(dataset)-1})"
+            
+            # Get pair data from cache (dictionary format)
+            pair_data = dataset.get_pair_data(idx)
+            
+            # Load motion model
+            if not os.path.exists(motion_model_path):
+                return None, None, f"Error: Motion model checkpoint not found: {motion_model_path}"
+            
+            motion_checkpoint = torch.load(motion_model_path, map_location=self.device)
+            motion_config = motion_checkpoint['config']
+            motion_model = MotionModel(
+                input_dim=motion_config['input_dim'],
+                hidden_dim=motion_config['hidden_dim'],
+                num_layers=motion_config['num_layers'],
+                latent_dim=motion_config['latent_dim'],
+                seq_len=motion_config['seq_len'],
+                dropout=motion_config['dropout'],
+                encoder_type=motion_config.get('encoder_type', 'gru'),
+                decoder_type=motion_config.get('decoder_type', 'gru'),
+                num_heads=motion_config.get('num_heads', 8),
+                ff_size=motion_config.get('ff_size', 2048),
+                activation=motion_config.get('activation', 'gelu'),
+                use_vae=motion_config.get('use_vae', False),
+                use_vqvae=motion_config.get('use_vqvae', False),
+                nb_code=motion_config.get('nb_code', motion_config.get('vq_codebook_size', 512)),
+                quantizer=motion_config.get('quantizer', motion_config.get('vq_quantizer', 'ema_reset')),
+                vq_mu=motion_config.get('vq_mu', motion_config.get('vq_ema_mu', 0.99)),
+                vq_beta=motion_config.get('vq_beta', motion_config.get('vq_commitment_cost', 1.0)),
+            ).to(self.device)
+            motion_model.load_state_dict(motion_checkpoint['model_state_dict'], strict=False)
+            motion_model.eval()
+            
+            # Load relationship model
+            if not os.path.exists(relationship_model_path):
+                return None, None, f"Error: Relationship model checkpoint not found: {relationship_model_path}"
+            
+            rel_checkpoint = torch.load(relationship_model_path, map_location=self.device)
+            rel_config = rel_checkpoint['config']
+            relationship_model = MotionModel(
+                input_dim=rel_config['input_dim'],
+                hidden_dim=rel_config['hidden_dim'],
+                num_layers=rel_config['num_layers'],
+                latent_dim=rel_config['latent_dim'],
+                seq_len=rel_config['seq_len'],
+                dropout=rel_config['dropout'],
+                encoder_type=rel_config.get('encoder_type', 'gru'),
+                decoder_type=rel_config.get('decoder_type', 'gru'),
+                num_heads=rel_config.get('num_heads', 8),
+                ff_size=rel_config.get('ff_size', 2048),
+                activation=rel_config.get('activation', 'gelu'),
+                use_vae=rel_config.get('use_vae', False),
+                use_vqvae=rel_config.get('use_vqvae', False),
+                nb_code=rel_config.get('nb_code', rel_config.get('vq_codebook_size', 512)),
+                quantizer=rel_config.get('quantizer', rel_config.get('vq_quantizer', 'ema_reset')),
+                vq_mu=rel_config.get('vq_mu', rel_config.get('vq_ema_mu', 0.99)),
+                vq_beta=rel_config.get('vq_beta', rel_config.get('vq_commitment_cost', 1.0)),
+            ).to(self.device)
+            relationship_model.load_state_dict(rel_checkpoint['model_state_dict'], strict=False)
+            relationship_model.eval()
+            
+            # Extract GT data
+            gt_leader_motion = pair_data['leader_motion']  # (19, 262) - canonicalized (separate canonical frame)
+            gt_follower_motion = pair_data['follower_motion']  # (19, 262) - canonicalized (separate canonical frame, NOT aligned)
+            gt_relationship = pair_data['relationship_features']  # (19, 4) - [w, z, x, z] - temporal relative features
+            root_quat_init_L = pair_data['root_quat_init_L']  # (4,)
+            root_pos_init_L = pair_data['root_pos_init_L']  # (3,)
+            root_quat_init_F = pair_data['root_quat_init_F']  # (4,)
+            root_pos_init_F = pair_data['root_pos_init_F']  # (3,)
+            
+            # NOTE: Both motions are stored as separate canonicalized motions (for single-motion network training)
+            # We need to apply rigid_transform using frame 0's relationship features to align follower to leader's space
+            
+            # Load normalization stats for both motion (interhuman) and relationship types
+            # The dataset object only has stats for its representation_type, so we load both separately
+            import pickle
+            cache_dir = dataset.cache_dir
+            epsilon = 1e-8
+            
+            motion_mean = None
+            motion_std = None
+            rel_mean = None
+            rel_std = None
+            
+            if dataset.normalize:
+                # Load InterHuman motion stats (262 dims)
+                motion_stats_path = os.path.join(cache_dir, 'normalization_stats_interhuman.pkl')
+                if os.path.exists(motion_stats_path):
+                    with open(motion_stats_path, 'rb') as f:
+                        motion_stats = pickle.load(f)
+                        motion_mean = motion_stats['mean']  # numpy array (262,)
+                        motion_std = motion_stats['std']  # numpy array (262,)
+                
+                # Load relationship stats (4 dims)
+                rel_stats_path = os.path.join(cache_dir, 'normalization_stats_relationship.pkl')
+                if os.path.exists(rel_stats_path):
+                    with open(rel_stats_path, 'rb') as f:
+                        rel_stats = pickle.load(f)
+                        rel_mean = rel_stats['mean']  # numpy array (4,)
+                        rel_std = rel_stats['std']  # numpy array (4,)
+            
+            # Normalize GT data if needed
+            if dataset.normalize and motion_mean is not None:
+                gt_leader_norm = (gt_leader_motion - motion_mean) / (motion_std + epsilon)
+                gt_follower_norm = (gt_follower_motion - motion_mean) / (motion_std + epsilon)
+            else:
+                gt_leader_norm = gt_leader_motion
+                gt_follower_norm = gt_follower_motion
+            
+            if dataset.normalize and rel_mean is not None:
+                gt_relationship_norm = (gt_relationship - rel_mean) / (rel_std + epsilon)
+            else:
+                gt_relationship_norm = gt_relationship
+            
+            # Reconstruct leader motion
+            with torch.no_grad():
+                leader_input = torch.from_numpy(gt_leader_norm).float().unsqueeze(0).to(self.device)  # (1, 19, 262)
+                leader_result = motion_model(leader_input)
+                if motion_model.use_vqvae:
+                    recon_leader_norm, _, _, _, _ = leader_result
+                else:
+                    recon_leader_norm, _, _, _ = leader_result
+                recon_leader_norm = recon_leader_norm[0].cpu().numpy()  # (19, 262)
+            
+            # Reconstruct follower motion
+            with torch.no_grad():
+                follower_input = torch.from_numpy(gt_follower_norm).float().unsqueeze(0).to(self.device)  # (1, 19, 262)
+                follower_result = motion_model(follower_input)
+                if motion_model.use_vqvae:
+                    recon_follower_norm, _, _, _, _ = follower_result
+                else:
+                    recon_follower_norm, _, _, _ = follower_result
+                recon_follower_norm = recon_follower_norm[0].cpu().numpy()  # (19, 262)
+            
+            # Reconstruct relationship features
+            with torch.no_grad():
+                relationship_input = torch.from_numpy(gt_relationship_norm).float().unsqueeze(0).to(self.device)  # (1, 19, 4)
+                relationship_result = relationship_model(relationship_input)
+                if relationship_model.use_vqvae:
+                    recon_relationship_norm, _, _, _, _ = relationship_result
+                else:
+                    recon_relationship_norm, _, _, _ = relationship_result
+                recon_relationship_norm = recon_relationship_norm[0].cpu().numpy()  # (19, 4)
+            
+            # Denormalize using the same stats we loaded for normalization
+            if dataset.normalize and motion_mean is not None:
+                recon_leader = recon_leader_norm * (motion_std + epsilon) + motion_mean
+                recon_follower = recon_follower_norm * (motion_std + epsilon) + motion_mean
+            else:
+                recon_leader = recon_leader_norm
+                recon_follower = recon_follower_norm
+            
+            if dataset.normalize and rel_mean is not None:
+                recon_relationship = recon_relationship_norm * (rel_std + epsilon) + rel_mean
+            else:
+                recon_relationship = recon_relationship_norm
+            
+            # Convert relationship features to rigid_transform parameters
+            # relationship_features are [w, z, x, z] - quaternion components [w, z] + position [x, z]
+            # Frame 0's relationship features match the initial transform exactly (from root_quat_init and root_pos_init)
+            # 
+            # IMPORTANT: We use frame 0's relationship features to compute the rigid_transform
+            # This transform aligns the follower (in its own canonical frame) to the leader's canonical frame
+            # 
+            # Frame 0's [w, z] are stored as [cos(θ/2), sin(θ/2)] where θ is the full yaw angle
+            # To recover the half-angle for rigid_transform: angle_half = arctan2(z, w)
+            # rigid_transform expects the half-angle (it does cos(angle) and sin(angle) to create [cos(θ/2), 0, sin(θ/2), 0])
+            
+            # Import in2IN's rigid_transform and quaternion functions
+            from in2in.utils.utils import rigid_transform
+            from in2in.utils.quaternion import qmul_np, qinv_np, qrot_np
+            
+            # ====================================================================
+            # DEBUG: Compare relative transform computation (Notebook vs Our Pipeline)
+            # ====================================================================
+            # Notebook approach: Compute directly from root_quat_init and root_pos_init
+            # (matching notebook's salsa_pair_to_interhuman lines 1231-1234)
+            r_relative_notebook = qmul_np(root_quat_init_F, qinv_np(root_quat_init_L))  # (4,)
+            angle_notebook = np.arctan2(r_relative_notebook[2], r_relative_notebook[0])  # scalar - half-angle
+            xz_notebook = qrot_np(root_quat_init_L, root_pos_init_F - root_pos_init_L)[[0, 2]]  # (2,)
+            relative_notebook = np.array([angle_notebook, xz_notebook[0], xz_notebook[1]])  # (3,) - [angle_half, x, z]
+            
+            # Our pipeline approach: Extract from relationship_features[0]
+            # (matching our extract_interhuman_relationship_features computation)
+            gt_rel_w = gt_relationship[0, 0]  # cos(θ/2)
+            gt_rel_z = gt_relationship[0, 1]  # sin(θ/2)
+            gt_relative_angle_half = np.arctan2(gt_rel_z, gt_rel_w)  # radians - half of yaw angle
+            relative_ours = np.array([gt_relative_angle_half, gt_relationship[0, 2], gt_relationship[0, 3]])  # (3,)
+            
+            # Compare
+            angle_diff = abs(angle_notebook - gt_relative_angle_half)
+            x_diff = abs(xz_notebook[0] - gt_relationship[0, 2])
+            z_diff = abs(xz_notebook[1] - gt_relationship[0, 3])
+            
+            print("\n" + "="*70)
+            print("DEBUG: Relative Transform Comparison (Notebook vs Our Pipeline)")
+            print("="*70)
+            print(f"Notebook approach (from root_quat_init/root_pos_init):")
+            print(f"  r_relative = qmul_np(root_quat_init_F, qinv_np(root_quat_init_L))")
+            print(f"  angle = arctan2(r_relative[2], r_relative[0])")
+            print(f"  xz = qrot_np(root_quat_init_L, root_pos_init_F - root_pos_init_L)[[0, 2]]")
+            print(f"  relative = [angle, xz[0], xz[1]]")
+            print(f"  Result: relative = [{angle_notebook:.6f}, {xz_notebook[0]:.6f}, {xz_notebook[1]:.6f}]")
+            print(f"  Angle (half): {np.degrees(angle_notebook):.3f} deg")
+            print(f"\nOur pipeline (from relationship_features[0]):")
+            print(f"  rel_w = relationship_features[0, 0] = {gt_rel_w:.6f}")
+            print(f"  rel_z = relationship_features[0, 1] = {gt_rel_z:.6f}")
+            print(f"  angle_half = arctan2(rel_z, rel_w)")
+            print(f"  relative = [angle_half, relationship_features[0, 2], relationship_features[0, 3]]")
+            print(f"  Result: relative = [{gt_relative_angle_half:.6f}, {gt_relationship[0, 2]:.6f}, {gt_relationship[0, 3]:.6f}]")
+            print(f"  Angle (half): {np.degrees(gt_relative_angle_half):.3f} deg")
+            print(f"\nDifferences:")
+            print(f"  Angle difference: {np.degrees(angle_diff):.6f} deg ({angle_diff:.2e} rad)")
+            print(f"  X difference: {x_diff:.6e}")
+            print(f"  Z difference: {z_diff:.6e}")
+            
+            threshold = 1e-4
+            if angle_diff < threshold and x_diff < threshold and z_diff < threshold:
+                print(f"\n✓ MATCH: Both approaches produce identical relative transform!")
+                print(f"  This confirms our relationship_features[0] matches the notebook's computation.")
+            else:
+                print(f"\n✗ MISMATCH: Approaches differ!")
+                print(f"  This indicates a discrepancy between notebook and our pipeline.")
+                if angle_diff >= threshold:
+                    print(f"  ⚠️  Angle difference is significant: {np.degrees(angle_diff):.3f} deg")
+                if x_diff >= threshold:
+                    print(f"  ⚠️  X difference is significant: {x_diff:.6e}")
+                if z_diff >= threshold:
+                    print(f"  ⚠️  Z difference is significant: {z_diff:.6e}")
+            print("="*70 + "\n")
+            
+            # For reconstructed: convert frame 0's relationship features to rigid_transform and apply
+            rel_w = recon_relationship[0, 0]  # cos(θ/2)
+            rel_z = recon_relationship[0, 1]  # sin(θ/2)
+            rel_x = recon_relationship[0, 2]
+            rel_z_pos = recon_relationship[0, 3]
+            
+            # Convert [w, z] quaternion components to half-angle
+            # [w, z] = [cos(θ/2), sin(θ/2)] → θ/2 = arctan2(z, w)
+            relative_angle_half = np.arctan2(rel_z, rel_w)  # radians - half of yaw angle (what rigid_transform expects)
+            relative_transform = np.array([relative_angle_half, rel_x, rel_z_pos])  # [angle_half, x, z]
+            
+            # DEBUG: Compare reconstructed relationship features with GT
+            recon_angle_diff = abs(gt_relative_angle_half - relative_angle_half)
+            recon_x_diff = abs(gt_relationship[0, 2] - rel_x)
+            recon_z_diff = abs(gt_relationship[0, 3] - rel_z_pos)
+            
+            print("="*70)
+            print("DEBUG: Reconstructed vs Ground Truth Relationship Features (Frame 0)")
+            print("="*70)
+            print(f"Ground Truth:  relative = [{gt_relative_angle_half:.6f}, {gt_relationship[0, 2]:.6f}, {gt_relationship[0, 3]:.6f}]")
+            print(f"Reconstructed: relative = [{relative_angle_half:.6f}, {rel_x:.6f}, {rel_z_pos:.6f}]")
+            print(f"\nDifferences:")
+            print(f"  Angle difference: {np.degrees(recon_angle_diff):.6f} deg ({recon_angle_diff:.2e} rad)")
+            print(f"  X difference: {recon_x_diff:.6e}")
+            print(f"  Z difference: {recon_z_diff:.6e}")
+            
+            recon_threshold = 1e-3  # More lenient for reconstruction
+            if recon_angle_diff < np.deg2rad(1.0) and recon_x_diff < 0.01 and recon_z_diff < 0.01:
+                print(f"\n✓ RECONSTRUCTION GOOD: Reconstructed relationship features are close to GT")
+            else:
+                print(f"\n⚠️  RECONSTRUCTION DIFFERS: Model may need more training")
+                if recon_angle_diff >= np.deg2rad(1.0):
+                    print(f"  ⚠️  Angle difference is significant: {np.degrees(recon_angle_diff):.3f} deg")
+                if recon_x_diff >= 0.01:
+                    print(f"  ⚠️  X difference is significant: {recon_x_diff:.6e}")
+                if recon_z_diff >= 0.01:
+                    print(f"  ⚠️  Z difference is significant: {recon_z_diff:.6e}")
+            print("="*70 + "\n")
+            
+            # Apply rigid_transform to reconstructed follower (canonicalized, not aligned)
+            # This aligns it to leader's canonical frame using frame 0's relationship features
+            recon_follower_rel = rigid_transform(relative_transform, recon_follower.copy())  # (19, 262)
+            
+            # For GT: also apply rigid_transform using frame 0's relationship features
+            # Both GT motions are stored as separate canonicalized motions (not aligned)
+            gt_rel_w = gt_relationship[0, 0]  # cos(θ/2)
+            gt_rel_z = gt_relationship[0, 1]  # sin(θ/2)
+            # Convert [w, z] to half-angle: θ/2 = arctan2(z, w)
+            # IMPORTANT: [w, z] = [cos(θ/2), sin(θ/2)], so arctan2(z, w) = θ/2 (half-angle, not full angle)
+            gt_relative_angle_half = np.arctan2(gt_rel_z, gt_rel_w)  # radians - half of yaw angle (what rigid_transform expects)
+            gt_relative_transform = np.array([gt_relative_angle_half, gt_relationship[0, 2], gt_relationship[0, 3]])
+            gt_follower_rel = rigid_transform(gt_relative_transform, gt_follower_motion.copy())  # (19, 262)
+            
+            # Extract joint positions for visualization
+            n_joints = 22
+            gt_leader_joints = gt_leader_motion[:, :n_joints*3].reshape(-1, n_joints, 3)  # (19, 22, 3)
+            gt_follower_joints = gt_follower_rel[:, :n_joints*3].reshape(-1, n_joints, 3)  # (19, 22, 3)
+            recon_leader_joints = recon_leader[:, :n_joints*3].reshape(-1, n_joints, 3)  # (19, 22, 3)
+            recon_follower_joints = recon_follower_rel[:, :n_joints*3].reshape(-1, n_joints, 3)  # (19, 22, 3)
+            
+            # Create visualizations using in2IN's plot function
+            if not IN2IN_AVAILABLE:
+                return None, None, "Error: in2IN library not available. Cannot visualize InterHuman motions."
+            
+            from in2in.utils.plot import plot_3d_motion
+            from in2in.utils.paramUtil import HML_KINEMATIC_CHAIN
+            
+            # Save GT visualization
+            gt_video_path = os.path.join(self.temp_dir, f"combined_gt_{idx}.mp4")
+            plot_3d_motion(
+                save_path=gt_video_path,
+                kinematic_tree=HML_KINEMATIC_CHAIN,
+                mp_joints=[gt_leader_joints, gt_follower_joints],
+                title="Ground Truth: Leader + Follower",
+                figsize=(12, 12),
+                fps=30,
+                radius=6
+            )
+            
+            # Save reconstructed visualization
+            recon_video_path = os.path.join(self.temp_dir, f"combined_recon_{idx}.mp4")
+            plot_3d_motion(
+                save_path=recon_video_path,
+                kinematic_tree=HML_KINEMATIC_CHAIN,
+                mp_joints=[recon_leader_joints, recon_follower_joints],
+                title="Reconstructed: Leader + Follower",
+                figsize=(12, 12),
+                fps=30,
+                radius=6
+            )
+            
+            # Build info string
+            info = f"Combined Motion + Relationship Reconstruction\n"
+            info += f"{'='*60}\n"
+            info += f"Sample Index: {idx}\n"
+            info += f"Sequence Length: 19 frames (window_size=20, InterHuman reduces by 1)\n\n"
+            info += f"Motion Model: {os.path.basename(motion_model_path)}\n"
+            info += f"Relationship Model: {os.path.basename(relationship_model_path)}\n\n"
+            info += f"Reconstruction Pipeline:\n"
+            info += f"  1. Reconstructed leader motion (canonicalized) from motion network\n"
+            info += f"  2. Reconstructed follower motion (canonicalized) from motion network\n"
+            info += f"  3. Reconstructed relationship features from relationship network\n"
+            info += f"  4. Converted relationship[0] [w, z, x, z] to rigid_transform [angle, x, z]\n"
+            info += f"  5. Applied rigid_transform to reconstructed follower\n"
+            info += f"  6. Visualized GT vs reconstructed side-by-side\n"
+            
+            return gt_video_path, recon_video_path, info
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Error in combined reconstruction: {str(e)}\n{traceback.format_exc()}"
+            return None, None, error_msg
 
     def quantize_samples(self, num_samples: int = 1000) -> Tuple[str, list]:
         """
@@ -1743,11 +2313,22 @@ def create_interface():
         font-weight: 600 !important;
         margin-bottom: 10px !important;
     }
+    h2 {
+        font-size: 24px !important;
+        font-weight: 600 !important;
+        margin-top: 30px !important;
+        margin-bottom: 15px !important;
+        color: #2c3e50 !important;
+    }
     h3 {
         font-size: 20px !important;
         font-weight: 500 !important;
         margin-top: 15px !important;
         margin-bottom: 10px !important;
+    }
+    hr {
+        border: 2px solid #bdc3c7 !important;
+        margin: 25px 0 !important;
     }
     """
     
@@ -1758,7 +2339,8 @@ def create_interface():
         
         with gr.Row():
             with gr.Column(scale=2):
-                gr.Markdown("### Model & Dataset Loading")
+                gr.Markdown("## 📦 Model & Dataset Loading")
+                gr.Markdown("<hr style='border: 2px solid #666; margin: 20px 0;'>")
                 checkpoint_path = gr.Textbox(
                     label="Checkpoint Path",
                     value="motion_representation/checkpoints/best_checkpoint.pth",
@@ -1774,9 +2356,9 @@ def create_interface():
                 )
                 is_MDM = gr.Checkbox(label="Is MDM Format", value=True)
                 train_relationship = gr.Checkbox(
-                    label="Load Relationship Features (4D)",
+                    label="Load Relationship Features (3D InterHuman)",
                     value=False,
-                    info="Check if loading relationship features instead of motion data"
+                    info="Check if loading relationship features (3D: [yaw, x, z]) instead of motion data"
                 )
                 load_dataset_btn = gr.Button("Load Dataset", variant="primary")
                 dataset_status = gr.Textbox(label="Dataset Status", interactive=False, lines=2)
@@ -1786,7 +2368,8 @@ def create_interface():
         
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### Reconstruction Visualization")
+                gr.Markdown("## 🔄 Reconstruction Visualization")
+                gr.Markdown("<hr style='border: 2px solid #666; margin: 20px 0;'>")
                 with gr.Row():
                     prev_btn = gr.Button("◀ Previous", size="sm")
                     sample_idx = gr.Number(
@@ -1810,7 +2393,8 @@ def create_interface():
         
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### Latent Space Visualization (t-SNE)")
+                gr.Markdown("## 🎨 Latent Space Visualization (t-SNE)")
+                gr.Markdown("<hr style='border: 2px solid #666; margin: 20px 0;'>")
                 with gr.Row():
                     num_samples_tsne = gr.Number(
                         label="Number of Samples",
@@ -2228,7 +2812,8 @@ def create_interface():
         # Codebook Debugging Section
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### 🔍 Codebook Debugging (VQ-VAE Only)")
+                gr.Markdown("## 🔍 Codebook Debugging (VQ-VAE Only)")
+                gr.Markdown("<hr style='border: 2px solid #666; margin: 20px 0;'>")
                 gr.Markdown("Analyze codebook state, usage, and diversity to debug collapse issues.")
                 
                 with gr.Row():
@@ -2270,7 +2855,8 @@ def create_interface():
         # Token Cluster Exploration Section (under codebook analysis)
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### 🔍 Token Cluster Exploration (VQ-VAE Only)")
+                gr.Markdown("## 🔍 Token Cluster Exploration (VQ-VAE Only)")
+                gr.Markdown("<hr style='border: 2px solid #666; margin: 20px 0;'>")
                 gr.Markdown(
                     "Quantize a batch of samples, then pick a **token/code index** and browse samples assigned to it. "
                     "This helps inspect how well the VQ-VAE codes cluster motions."
@@ -2462,7 +3048,8 @@ def create_interface():
         # Long Sequence Visualization Section
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### 🎬 Long Sequence Generation")
+                gr.Markdown("## 🎬 Long Sequence Generation")
+                gr.Markdown("<hr style='border: 2px solid #666; margin: 20px 0;'>")
                 gr.Markdown("Generate long sequences using autoregressive inference. Load raw LMDB to select videos and clips.")
                 
                 # Raw LMDB loading
@@ -2597,7 +3184,8 @@ def create_interface():
         # Combined Reconstruction Section (reuses same inputs)
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### 👥 Combined Reconstruction (Both Dancers)")
+                gr.Markdown("## 👥 Combined Reconstruction (Both Dancers)")
+                gr.Markdown("<hr style='border: 2px solid #666; margin: 20px 0;'>")
                 gr.Markdown("Visualize both leader and follower dancing together: original vs reconstructed. Uses the same video/clip/frame selection above.")
                 
                 with gr.Row():
@@ -2637,8 +3225,9 @@ def create_interface():
         # Relationship Features Visualization Section
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### 🔗 Relationship Features Visualization")
-                gr.Markdown("Visualize 4D relationship features (translation + rotation differences) as time series plots. Each plot shows original vs reconstructed for one dimension.")
+                gr.Markdown("## 🔗 Relationship Features Visualization")
+                gr.Markdown("<hr style='border: 2px solid #666; margin: 20px 0;'>")
+                gr.Markdown("Visualize 3D relationship features ([yaw, x, z] from InterHuman canonical frames) as time series plots. Each plot shows original vs reconstructed for one dimension.")
                 
                 with gr.Row():
                     rel_sample_idx = gr.Number(
@@ -2710,6 +3299,121 @@ def create_interface():
             fn=on_rel_next,
             inputs=[rel_sample_idx],
             outputs=[rel_sample_idx, rel_plot, rel_info]
+        )
+        
+        # ========================================================================
+        # Combined Motion + Relationship Reconstruction Section
+        # ========================================================================
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("## 🔄 Combined Motion + Relationship Reconstruction")
+                gr.Markdown("<hr style='border: 3px solid #333; margin: 20px 0;'>")
+                gr.Markdown(
+                    "**Reconstruct pairs using both motion and relationship networks.**\n\n"
+                    "This section loads two models:\n"
+                    "- **Motion Network**: Reconstructs canonicalized InterHuman motions (leader and follower separately)\n"
+                    "- **Relationship Network**: Reconstructs relationship features [w, z, x, z]\n\n"
+                    "The pipeline:\n"
+                    "1. Reconstruct leader motion (canonicalized) from motion network\n"
+                    "2. Reconstruct follower motion (canonicalized) from motion network\n"
+                    "3. Reconstruct relationship features from relationship network\n"
+                    "4. Convert relationship[0] to rigid_transform parameters [angle, x, z]\n"
+                    "5. Apply rigid_transform to reconstructed follower to move it into leader's space\n"
+                    "6. Visualize GT vs reconstructed side-by-side"
+                )
+                
+                with gr.Row():
+                    with gr.Column():
+                        motion_model_path = gr.Textbox(
+                            label="Motion Model Checkpoint Path",
+                            placeholder="path/to/motion_model.ckpt",
+                            info="Path to InterHuman motion model checkpoint"
+                        )
+                        relationship_model_path = gr.Textbox(
+                            label="Relationship Model Checkpoint Path",
+                            placeholder="path/to/relationship_model.ckpt",
+                            info="Path to relationship features model checkpoint"
+                        )
+                
+                with gr.Row():
+                    combined_sample_idx = gr.Number(
+                        label="Sample Index",
+                        value=0,
+                        minimum=0,
+                        step=1,
+                        precision=0,
+                        info="Index from the dataset (must be InterHuman or relationship representation_type)"
+                    )
+                    combined_prev_btn = gr.Button("◀ Previous", size="sm")
+                    combined_next_btn = gr.Button("Next ▶", size="sm")
+                
+                with gr.Row():
+                    combined_gt_video = gr.Video(label="Ground Truth: Leader + Follower")
+                    combined_recon_video = gr.Video(label="Reconstructed: Leader + Follower")
+                
+                combined_info = gr.Textbox(
+                    label="Visualization Info",
+                    interactive=False,
+                    lines=15
+                )
+                
+                visualize_combined_btn = gr.Button("Visualize Combined Reconstruction", variant="primary")
+        
+        def on_visualize_combined(motion_path, rel_path, idx_val):
+            try:
+                idx = int(idx_val) if idx_val is not None else 0
+                gt_video, recon_video, info = app.visualize_combined_reconstruction(
+                    motion_path, rel_path, idx
+                )
+                return gt_video, recon_video, info
+            except Exception as e:
+                import traceback
+                error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
+                return None, None, error_msg
+        
+        def on_combined_prev(motion_path, rel_path, idx_val):
+            try:
+                idx = int(idx_val) if idx_val is not None else 0
+                new_idx = max(0, idx - 1)
+                gt_video, recon_video, info = app.visualize_combined_reconstruction(
+                    motion_path, rel_path, new_idx
+                )
+                return new_idx, gt_video, recon_video, info
+            except Exception as e:
+                import traceback
+                error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
+                return idx_val, None, None, error_msg
+        
+        def on_combined_next(motion_path, rel_path, idx_val):
+            try:
+                idx = int(idx_val) if idx_val is not None else 0
+                max_idx = len(app.dataloader.dataset) - 1 if app.dataloader else 0
+                new_idx = min(max_idx, idx + 1)
+                gt_video, recon_video, info = app.visualize_combined_reconstruction(
+                    motion_path, rel_path, new_idx
+                )
+                return new_idx, gt_video, recon_video, info
+            except Exception as e:
+                import traceback
+                error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
+                return idx_val, None, None, error_msg
+        
+        visualize_combined_btn.click(
+            fn=on_visualize_combined,
+            inputs=[motion_model_path, relationship_model_path, combined_sample_idx],
+            outputs=[combined_gt_video, combined_recon_video, combined_info]
+        )
+        
+        combined_prev_btn.click(
+            fn=on_combined_prev,
+            inputs=[motion_model_path, relationship_model_path, combined_sample_idx],
+            outputs=[combined_sample_idx, combined_gt_video, combined_recon_video, combined_info]
+        )
+        
+        combined_next_btn.click(
+            fn=on_combined_next,
+            inputs=[motion_model_path, relationship_model_path, combined_sample_idx],
+            outputs=[combined_sample_idx, combined_gt_video, combined_recon_video, combined_info]
         )
     
     return demo
