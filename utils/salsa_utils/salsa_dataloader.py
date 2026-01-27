@@ -7,7 +7,8 @@ import sys
 import math
 import pickle
 import os
-from typing import Tuple
+from typing import Tuple, Optional
+from pathlib import Path
 
 import lmdb
 import numpy as np
@@ -237,6 +238,66 @@ class DataPreprocessor:
         self.audio_sampling_rate = 24000
 
         # self.Dance_moves_annot = pickle.load(open('Bermet/processed_dance_annotations.pk', 'rb'))
+        
+        # Annotation file cache (per take ID)
+        self.annotation_cache = {}
+        
+        # Move class mapping (README Glossary + utils_gesture2vec). "Suzy Q" per README.
+        self.MOVE_MAPPING = {
+            'Arm lock': ['arm lock'],
+            'Basic step': ['basic step', 'side basic step', 'cross back basic step', 'back basic step'],
+            'Body Shake': ['body shake'],
+            'Body roll': ['body roll'],
+            'Change of Directions': ['change of directions', 'swap position'],
+            'Check': ['check'],
+            'Comb': ['comb'],
+            'Copa': ['copa'],
+            'Dile que no': ['dile que no'],
+            'Hand throw': ['hand throw', 'right hand throw', 'left hand throw', 'double hand throw'],
+            'right turn': ['right turn for the', 'right turn'],
+            'Drawing circle': ['drawing circle'],
+            'Enchufla': ['enchufla'],
+            'walks around': ['walks around'],
+            'Suzy': ['suzy', 'suzy q'],
+            'Hip movement': ['hip movement'],
+            'Kicks': ['kicks'],
+            'Lasso': ['lasso'],
+            'Natural top': ['natural top'],
+            'Left turn': ['left turn for the', 'left turn'],
+            'Mambo': ['mambo'],
+            'Open break': ['open break'],
+            'Point': ['point'],
+            'Sliding': ['sliding'],
+            'Standing': ['standing'],
+            'Steps': ['steps', 'advanced footwork', 'footwork variation', 'twisting on beat', 'footwork'],
+            'Swing': ['swing'],
+            'Walk': ['walk'],
+            'XBL': ['xbl'],
+            'Siete': ['siete'],
+            'Indescribable': ['indescribable', 'misread signals', 'misinterpreted signal', 'failed move', 'mixed signals and failed move'],
+            'Markers Swap issue': ['markers swap issue']
+        }
+        self.ERROR_MAPPING = {
+            'Misinterpreted signal': ['misinterpreted', 'misread', 'misunderstand'],
+            'Misstep': ['misstep', 'incorrect foot', 'wrong foot'],
+            'Mixed signals': ['mixed signals', 'conflicting'],
+            'Off beat': ['off beat'],
+        }
+        
+        # Dataset root for annotations: Dataset/compas3d/PairX/PairX_songY_takeZ/*.txt
+        _dr = os.environ.get('SALSA_DATASET_ROOT') or os.environ.get('SALSA_DATA_ROOT')
+        if _dr:
+            self._dataset_root = Path(_dr)
+        else:
+            self._dataset_root = Path('/localhome/pjomeyaz/Payam_Files/Projects/Salsa_Dance/Dataset')
+        if not self._dataset_root.exists():
+            self._dataset_root = Path(__file__).resolve().parents[4] / 'Dataset'
+        
+        # Lazy loading for InterHuman tokenizers (only load if needed)
+        self.interhuman_motion_tokenizer = None
+        self.relationship_tokenizer = None
+        self.interhuman_normalization_stats = None
+        self.relationship_normalization_stats = None
 
     def run(self) -> None:
         """Extract skeleton, audio, word data from source and write entries into a destination Lmdb file.
@@ -258,7 +319,7 @@ class DataPreprocessor:
             for clip_idx, clip in enumerate(clips):
                 self._sample_from_clip(vid, clip)
                 counter = counter + 1
-            if counter > 2: break
+            # if counter > 2: break
 
         # print number of samples
         with self.dst_lmdb_env.begin() as txn:
@@ -269,6 +330,211 @@ class DataPreprocessor:
         self.dst_lmdb_env.sync()
         self.dst_lmdb_env.close()
 
+    def _extract_take_id_from_vid(self, vid: str) -> Optional[str]:
+        """Extract take ID from vid for annotation lookup.
+        
+        Vid is e.g. "Pair1_song1_take1_leader,Pair1_song1_take1_follower".
+        Take ID = "Pair1_song1_take1". Annotations live only in Dataset/compas3d/PairX/PairX_songY_takeZ/PairX_songY_takeZ.txt.
+        """
+        if ',' in vid:
+            base = vid.split(',')[0].strip()
+        else:
+            base = vid.strip()
+        for suffix in ('_leader', '_leader_subject', '_follower', '_follower_subject'):
+            if base.lower().endswith(suffix):
+                base = base[:-len(suffix)].rstrip('_')
+                break
+        if not base or 'pair' not in base.lower().split('_')[0]:
+            return None
+        parts = base.split('_')
+        if len(parts) < 3:
+            return None
+        return base
+    
+    def _load_annotation_file_for_take(self, take_id: str, vid: str = '') -> Optional[list]:
+        """Load annotation .txt only from the take folder in Dataset/compas3d.
+        
+        Path: {dataset_root}/compas3d/PairX/PairX_songY_takeZ/PairX_songY_takeZ.txt.
+        A take has annotations iff that .txt exists in its folder; we do not use any other source.
+        """
+        if take_id in self.annotation_cache:
+            return self.annotation_cache[take_id]
+        
+        # e.g. Pair1_song1_take1 -> compas3d/Pair1/Pair1_song1_take1/Pair1_song1_take1.txt
+        parts = take_id.split('_')
+        if len(parts) < 3 or 'pair' not in parts[0].lower():
+            self.annotation_cache[take_id] = None
+            return None
+        pair_folder = parts[0]
+        ann_path = self._dataset_root / 'compas3d' / pair_folder / take_id / f"{take_id}.txt"
+        
+        if not ann_path.exists():
+            self.annotation_cache[take_id] = None
+            return None
+        
+        annotations = []
+        try:
+            with open(ann_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split('\t')
+                    if len(parts) < 8:
+                        continue
+                    ann_type = parts[0]
+                    role = parts[1] if len(parts) > 1 else ''
+                    start_time_sec = float(parts[3])
+                    end_time_sec = float(parts[5])
+                    duration_sec = float(parts[7])
+                    description = (parts[8] if len(parts) > 8 else '').strip()
+                    annotations.append({
+                        'type': ann_type,
+                        'role': role,
+                        'start_time': start_time_sec,
+                        'end_time': end_time_sec,
+                        'duration': duration_sec,
+                        'description': description,
+                        'start_time_str': parts[2],
+                        'end_time_str': parts[4],
+                        'duration_str': parts[6],
+                    })
+            self.annotation_cache[take_id] = annotations
+            if not getattr(self, '_ann_load_logged', None):
+                self._ann_load_logged = set()
+            if take_id not in self._ann_load_logged:
+                self._ann_load_logged.add(take_id)
+                print(f"[Annotations] Loaded {ann_path.name} ({len(annotations)} entries) for take {take_id}")
+            return annotations
+        except Exception as e:
+            print(f"Warning: Error loading annotation file {ann_path}: {e}")
+            self.annotation_cache[take_id] = None
+            return None
+    
+    def _extract_move_class(self, description: str) -> Optional[str]:
+        """Extract move class from description using MOVE_MAPPING heuristics.
+        
+        Returns move class name or None if not found.
+        """
+        if not description:
+            return None
+        
+        description_lower = description.lower()
+        
+        # Check each move class pattern
+        for class_name, patterns in self.MOVE_MAPPING.items():
+            if any(pattern in description_lower for pattern in patterns):
+                return class_name
+        
+        # If no match found, return None (will be flagged)
+        return None
+    
+    def _extract_error_class(self, description: str) -> Optional[str]:
+        """Extract error class from description using ERROR_MAPPING (README Glossary)."""
+        if not description:
+            return None
+        d = description.lower()
+        for class_name, patterns in self.ERROR_MAPPING.items():
+            if any(p in d for p in patterns):
+                return class_name
+        return None
+    
+    def _match_annotations_to_window(self, annotations: list, start_time: float, end_time: float) -> dict:
+        """Match annotations to a time window.
+        
+        Returns dict with keys: 'moves', 'errors', 'styling_leader', 'styling_follower'
+        Each contains list of matched annotation dicts with overlap info.
+        """
+        matched = {
+            'moves': [],
+            'errors': [],
+            'styling_leader': [],
+            'styling_follower': []
+        }
+        
+        if not annotations:
+            return matched
+        
+        for ann in annotations:
+            ann_start = ann['start_time']
+            ann_end = ann['end_time']
+            
+            # Check overlap
+            overlap_start = max(start_time, ann_start)
+            overlap_end = min(end_time, ann_end)
+            
+            if overlap_end > overlap_start:
+                overlap_duration = overlap_end - overlap_start
+                ann_duration = ann_end - ann_start
+                overlap_percentage = overlap_duration / ann_duration if ann_duration > 0 else 0
+                
+                # Only include if significant overlap (>30%)
+                if overlap_percentage > 0.3:
+                    desc = ann.get('description') or ''
+                    desc_lower = desc.lower()
+                    move_class = self._extract_move_class(desc) if ann['type'] != 'Errors' else None
+                    error_class = self._extract_error_class(desc) if ann['type'] == 'Errors' else None
+                    ann_info = {
+                        'type': ann['type'],
+                        'role': ann['role'],
+                        'description': desc,
+                        'move_class': move_class,
+                        'error_class': error_class,
+                        'start_time': ann_start,
+                        'end_time': ann_end,
+                        'duration': ann_duration,
+                        'overlap_start': overlap_start,
+                        'overlap_end': overlap_end,
+                        'overlap_percentage': overlap_percentage
+                    }
+                    
+                    if ann['type'] == 'Errors':
+                        matched['errors'].append(ann_info)
+                    elif ann['type'] == 'Separate_Leader' or (ann['type'] == 'Together' and 'Leader' in ann['role']):
+                        if 'styling' in desc_lower or 'man styling' in desc_lower:
+                            matched['styling_leader'].append(ann_info)
+                        elif desc.strip():
+                            matched['moves'].append(ann_info)
+                    elif ann['type'] == 'Separate_Follower' or (ann['type'] == 'Together' and 'Follower' in ann['role']):
+                        if 'styling' in desc_lower or 'lady styling' in desc_lower:
+                            matched['styling_follower'].append(ann_info)
+                        elif desc.strip():
+                            matched['moves'].append(ann_info)
+                    elif ann['type'] == 'Together':
+                        if 'styling' in desc_lower:
+                            matched['styling_leader'].append(ann_info)
+                            matched['styling_follower'].append(ann_info)
+                        elif desc.strip():
+                            matched['moves'].append(ann_info)
+        
+        return matched
+    
+    def _get_annotations_for_window(self, vid: str, start_time: float, end_time: float) -> dict:
+        """Get annotations for a time window from the corresponding annotation file.
+        
+        This is the main function to call during window sampling.
+        Returns dict with 'moves', 'errors', 'styling_leader', 'styling_follower'.
+        """
+        # Extract take ID from vid
+        take_id = self._extract_take_id_from_vid(vid)
+        if not take_id:
+            return {'moves': [], 'errors': [], 'styling_leader': [], 'styling_follower': []}
+        
+        # Load annotation file for this take (try take_id and vid-based alternates)
+        annotations = self._load_annotation_file_for_take(take_id, vid=vid)
+        if not annotations:
+            return {'moves': [], 'errors': [], 'styling_leader': [], 'styling_follower': []}
+        
+        # Match annotations to window
+        matched = self._match_annotations_to_window(annotations, start_time, end_time)
+        
+        # Flag non-empty moves without class for user review (skip empty descriptions)
+        for move in matched['moves']:
+            if move['move_class'] is None and (move.get('description') or '').strip():
+                print(f"⚠️  Unclassified move: '{move['description']}' (take: {take_id}, time: {move['start_time']:.2f}-{move['end_time']:.2f}s)")
+        
+        return matched
+    
     def _sample_from_clip(self, vid: str, clip: dict) -> None:
         """Internal function to extract and write skeleton, audio and word data from provided clip.
 
@@ -429,7 +695,7 @@ class DataPreprocessor:
             #     # signal = librosa.amplitude_to_db(signal)
 
 
-            # Extract dance moves labels
+            # Extract dance moves labels from annotation files
 
             motion_info = {'vid': vid,
                            'start_frame_no': start_idx,
@@ -437,48 +703,12 @@ class DataPreprocessor:
                            'start_time': subdivision_start_time,
                            'end_time': subdivision_end_time}
 
-            def get_dance_moves(motion_info_x):
-                DD_vid = motion_info_x['vid']
-                get_moves = []
-                current_take = DD_vid  # [:15]
-                current_role = 'Follower' if 'follower' in DD_vid else 'Leader'
-                current_start_time, current_end_time = motion_info_x['start_time'], motion_info_x['end_time']
-
-                def time2seconds(timestamp):
-                    from datetime import datetime
-                    # timestamp = "00:00:00.000"
-                    time_obj = datetime.strptime(timestamp, "%H:%M:%S.%f")  # Parses timestamp
-                    total_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second + time_obj.microsecond / 1e6
-                    return total_seconds
-
-                # for i in range(len(self.Dance_moves_annot)):
-                #     temp = self.Dance_moves_annot[i]
-                #     if temp['ID'] in current_take and \
-                #             current_role in temp['role']:
-                #
-                #         # print(temp['role'])
-                #         if current_start_time >= time2seconds(temp['start_time']) and current_end_time <= time2seconds(
-                #                 temp['end_time']):
-                #             get_moves.append(self.Dance_moves_annot[i])
-                for i in range(len(self.Dance_moves_annot)):
-                    temp = self.Dance_moves_annot[i]
-                    if temp['ID'] in current_take and current_role in temp['role']:
-                        move_start_time = time2seconds(temp['start_time'])
-                        move_end_time = time2seconds(temp['end_time'])
-                        move_duration = move_end_time - move_start_time
-                        overlap_start = max(current_start_time, move_start_time)
-                        overlap_end = min(current_end_time, move_end_time)
-
-                        if overlap_end > overlap_start:  # Check if there is an overlap
-                            overlap_duration = overlap_end - overlap_start
-                            overlap_percentage = overlap_duration / move_duration
-
-                            if overlap_percentage > 0.6:  # Check if overlap is more than 60%
-                                get_moves.append(self.Dance_moves_annot[i])
-                return get_moves
-
-            # dance_moves = get_dance_moves(motion_info)
-            # motion_info['dance_moves'] = dance_moves
+            # Get annotations for this window
+            annotations = self._get_annotations_for_window(vid, subdivision_start_time, subdivision_end_time)
+            motion_info['dance_moves'] = annotations['moves']
+            motion_info['errors'] = annotations['errors']
+            motion_info['styling_leader'] = annotations['styling_leader']
+            motion_info['styling_follower'] = annotations['styling_follower']
 
 
             sample_skeleton3d_list.append(sample_skeletons3d)
@@ -521,6 +751,415 @@ class DataPreprocessor:
 
         print()
 
+    def _load_interhuman_tokenizers(self):
+        """Lazy load InterHuman and Relationship VQVAE tokenizers."""
+        if self.interhuman_motion_tokenizer is not None:
+            return  # Already loaded
+        
+        import sys
+        import os
+        # Add motion_representation to path
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        motion_rep_path = os.path.join(project_root, 'Salsa-Agent', 'motion_representation')
+        if motion_rep_path not in sys.path:
+            sys.path.insert(0, motion_rep_path)
+        
+        from motion_representation.models.motion_model import MotionModel
+        
+        device = self.args.device if hasattr(self.args, 'device') else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        
+        # Load InterHuman Motion VQVAE
+        interhuman_ckpt_path = os.path.join(motion_rep_path, 'checkpoints_VQVAE_GRU_InterHuman', 'best_checkpoint.pth')
+        if not os.path.exists(interhuman_ckpt_path):
+            # Try latest checkpoint
+            import glob
+            checkpoints = glob.glob(os.path.join(motion_rep_path, 'checkpoints_VQVAE_GRU_InterHuman', 'checkpoint_epoch_*.pth'))
+            if checkpoints:
+                interhuman_ckpt_path = max(checkpoints, key=os.path.getctime)
+            else:
+                raise FileNotFoundError(f"InterHuman VQVAE checkpoint not found in {os.path.join(motion_rep_path, 'checkpoints_VQVAE_GRU_InterHuman')}")
+        
+        print(f"Loading InterHuman Motion VQVAE from {interhuman_ckpt_path}")
+        interhuman_ckpt = torch.load(interhuman_ckpt_path, map_location='cpu')
+        interhuman_config = interhuman_ckpt['config']
+        
+        self.interhuman_motion_tokenizer = MotionModel(
+            input_dim=interhuman_config['input_dim'],
+            hidden_dim=interhuman_config['hidden_dim'],
+            num_layers=interhuman_config['num_layers'],
+            latent_dim=interhuman_config['latent_dim'],
+            seq_len=interhuman_config['seq_len'],
+            dropout=interhuman_config['dropout'],
+            encoder_type=interhuman_config.get('encoder_type', 'gru'),
+            decoder_type=interhuman_config.get('decoder_type', 'gru'),
+            use_vqvae=True,
+            nb_code=interhuman_config.get('nb_code', 512),
+            quantizer=interhuman_config.get('quantizer', 'ema_reset'),
+            vq_mu=interhuman_config.get('vq_mu', 0.95),
+        ).to(device)
+        self.interhuman_motion_tokenizer.load_state_dict(interhuman_ckpt['model_state_dict'])
+        self.interhuman_motion_tokenizer.eval()
+        
+        # Load Relationship VQVAE
+        relationship_ckpt_path = os.path.join(motion_rep_path, 'checkpoints_VQVAE_GRU_Relationship', 'best_checkpoint.pth')
+        if not os.path.exists(relationship_ckpt_path):
+            import glob
+            checkpoints = glob.glob(os.path.join(motion_rep_path, 'checkpoints_VQVAE_GRU_Relationship', 'checkpoint_epoch_*.pth'))
+            if checkpoints:
+                relationship_ckpt_path = max(checkpoints, key=os.path.getctime)
+            else:
+                raise FileNotFoundError(f"Relationship VQVAE checkpoint not found in {os.path.join(motion_rep_path, 'checkpoints_VQVAE_GRU_Relationship')}")
+        
+        print(f"Loading Relationship VQVAE from {relationship_ckpt_path}")
+        relationship_ckpt = torch.load(relationship_ckpt_path, map_location='cpu')
+        relationship_config = relationship_ckpt['config']
+        
+        self.relationship_tokenizer = MotionModel(
+            input_dim=relationship_config['input_dim'],
+            hidden_dim=relationship_config['hidden_dim'],
+            num_layers=relationship_config['num_layers'],
+            latent_dim=relationship_config['latent_dim'],
+            seq_len=relationship_config['seq_len'],
+            dropout=relationship_config['dropout'],
+            encoder_type=relationship_config.get('encoder_type', 'gru'),
+            decoder_type=relationship_config.get('decoder_type', 'gru'),
+            use_vqvae=True,
+            nb_code=relationship_config.get('nb_code', 512),
+            quantizer=relationship_config.get('quantizer', 'ema_reset'),
+            vq_mu=relationship_config.get('vq_mu', 0.95),
+        ).to(device)
+        self.relationship_tokenizer.load_state_dict(relationship_ckpt['model_state_dict'])
+        self.relationship_tokenizer.eval()
+        
+        # Load normalization statistics
+        # Try multiple possible cache locations (matching visualization app approach)
+        possible_cache_dirs = [
+            os.path.join(project_root, 'Salsa-Agent', 'dataset_processed_New', 'lmdb_Salsa_pair', 'lmdb_train_interhuman_20frames_cache'),  # Actual location (no /dd/)
+            os.path.join(project_root, 'Salsa-Agent', 'dataset_processed_New', 'lmdb_Salsa_pair', 'dd', 'lmdb_train_interhuman_20frames_cache'),  # Alternative location
+        ]
+        
+        interhuman_stats_path = None
+        relationship_stats_path = None
+        
+        for cache_dir in possible_cache_dirs:
+            if interhuman_stats_path is None:
+                test_path = os.path.join(cache_dir, 'normalization_stats_interhuman.pkl')
+                if os.path.exists(test_path):
+                    interhuman_stats_path = test_path
+                    print(f"Found InterHuman normalization stats at: {interhuman_stats_path}")
+            
+            if relationship_stats_path is None:
+                test_path = os.path.join(cache_dir, 'normalization_stats_relationship.pkl')
+                if os.path.exists(test_path):
+                    relationship_stats_path = test_path
+                    print(f"Found Relationship normalization stats at: {relationship_stats_path}")
+            
+            if interhuman_stats_path and relationship_stats_path:
+                break
+        
+        if interhuman_stats_path and os.path.exists(interhuman_stats_path):
+            with open(interhuman_stats_path, 'rb') as f:
+                self.interhuman_normalization_stats = pickle.load(f)
+            print(f"Loaded InterHuman normalization stats successfully")
+        else:
+            print(f"ERROR: InterHuman normalization stats not found!")
+            print(f"  Searched in: {possible_cache_dirs}")
+            self.interhuman_normalization_stats = None
+        
+        if relationship_stats_path and os.path.exists(relationship_stats_path):
+            with open(relationship_stats_path, 'rb') as f:
+                self.relationship_normalization_stats = pickle.load(f)
+            print(f"Loaded Relationship normalization stats successfully")
+        else:
+            print(f"ERROR: Relationship normalization stats not found!")
+            print(f"  Searched in: {possible_cache_dirs}")
+            self.relationship_normalization_stats = None
+        
+        print("InterHuman tokenizers loaded successfully!")
+
+    def _convert_to_interhuman_and_tokenize_sequence(self, full_keypoints3d_L, full_rotmat_L,
+                                                      full_keypoints3d_F, full_rotmat_F):
+        """
+        Convert full sequence to InterHuman representation and tokenize window by window.
+        Splits sequence into 20-frame windows and tokenizes each separately.
+        
+        Args:
+            full_keypoints3d_L: (T, 22, 3) numpy array - Leader keypoints for full sequence
+            full_rotmat_L: (T, 498) numpy array - Leader rotation matrices for full sequence
+            full_keypoints3d_F: (T, 22, 3) numpy array - Follower keypoints for full sequence
+            full_rotmat_F: (T, 498) numpy array - Follower rotation matrices for full sequence
+        
+        Returns:
+            dict with keys:
+                - leader_motion_ih: (T-1, 262) numpy array - Full InterHuman canonicalized motion (concatenated)
+                - follower_motion_ih: (T-1, 262) numpy array
+                - relationship_features: (T-1, 4) numpy array - [w, z, x, z]
+                - leader_tokens: (num_windows,) numpy array - VQ token indices, one per 20-frame window
+                - follower_tokens: (num_windows,) numpy array
+                - relationship_tokens: (num_windows,) numpy array
+                - root_quat_init_L: (4,) numpy array - Frame 0 root quaternion (from first window)
+                - root_pos_init_L: (3,) numpy array - Frame 0 root position (from first window)
+                - root_quat_init_F: (4,) numpy array
+                - root_pos_init_F: (3,) numpy array
+        """
+        window_size = 20  # Tokenizer expects 20-frame windows
+        T = len(full_keypoints3d_L)
+        
+        # Calculate number of windows
+        num_windows = (T + window_size - 1) // window_size  # Ceiling division
+        
+        # Lists to store results from each window
+        leader_motions_ih = []
+        follower_motions_ih = []
+        relationship_features_list = []
+        leader_tokens_list = []
+        follower_tokens_list = []
+        relationship_tokens_list = []
+        
+        # Store root transforms from first window only
+        root_quat_init_L_frame0 = None
+        root_pos_init_L_frame0 = None
+        root_quat_init_F_frame0 = None
+        root_pos_init_F_frame0 = None
+        
+        # Process each window
+        for w in range(num_windows):
+            start_idx = w * window_size
+            end_idx = min(start_idx + window_size, T)
+            
+            # Extract window
+            window_keypoints3d_L = full_keypoints3d_L[start_idx:end_idx]
+            window_rotmat_L = full_rotmat_L[start_idx:end_idx]
+            window_keypoints3d_F = full_keypoints3d_F[start_idx:end_idx]
+            window_rotmat_F = full_rotmat_F[start_idx:end_idx]
+            
+            # Pad last window if needed (shouldn't happen for 100 frames, but handle it)
+            if len(window_keypoints3d_L) < window_size:
+                # Pad with last frame
+                pad_frames = window_size - len(window_keypoints3d_L)
+                window_keypoints3d_L = np.concatenate([
+                    window_keypoints3d_L,
+                    np.tile(window_keypoints3d_L[-1:], (pad_frames, 1, 1))
+                ], axis=0)
+                window_rotmat_L = np.concatenate([
+                    window_rotmat_L,
+                    np.tile(window_rotmat_L[-1:], (pad_frames, 1))
+                ], axis=0)
+                window_keypoints3d_F = np.concatenate([
+                    window_keypoints3d_F,
+                    np.tile(window_keypoints3d_F[-1:], (pad_frames, 1, 1))
+                ], axis=0)
+                window_rotmat_F = np.concatenate([
+                    window_rotmat_F,
+                    np.tile(window_rotmat_F[-1:], (pad_frames, 1))
+                ], axis=0)
+            
+            # Convert and tokenize this window
+            window_data = self._convert_to_interhuman_and_tokenize(
+                window_keypoints3d_L, window_rotmat_L,
+                window_keypoints3d_F, window_rotmat_F
+            )
+            
+            # Store results
+            leader_motions_ih.append(window_data['leader_motion_ih'])  # (19, 262)
+            follower_motions_ih.append(window_data['follower_motion_ih'])  # (19, 262)
+            relationship_features_list.append(window_data['relationship_features'])  # (19, 4)
+            leader_tokens_list.append(window_data['leader_tokens'][0])  # scalar
+            follower_tokens_list.append(window_data['follower_tokens'][0])  # scalar
+            relationship_tokens_list.append(window_data['relationship_tokens'][0])  # scalar
+            
+            # Store root transforms from first window
+            if w == 0:
+                root_quat_init_L_frame0 = window_data['root_quat_init_L']
+                root_pos_init_L_frame0 = window_data['root_pos_init_L']
+                root_quat_init_F_frame0 = window_data['root_quat_init_F']
+                root_pos_init_F_frame0 = window_data['root_pos_init_F']
+        
+        # Concatenate all windows
+        leader_motion_ih_full = np.concatenate(leader_motions_ih, axis=0)  # (num_windows*19, 262)
+        follower_motion_ih_full = np.concatenate(follower_motions_ih, axis=0)  # (num_windows*19, 262)
+        relationship_features_full = np.concatenate(relationship_features_list, axis=0)  # (num_windows*19, 4)
+        
+        # Convert token lists to arrays
+        leader_tokens_array = np.array(leader_tokens_list, dtype=np.int64)  # (num_windows,)
+        follower_tokens_array = np.array(follower_tokens_list, dtype=np.int64)  # (num_windows,)
+        relationship_tokens_array = np.array(relationship_tokens_list, dtype=np.int64)  # (num_windows,)
+        
+        return {
+            'leader_motion_ih': leader_motion_ih_full.astype(np.float32),  # (num_windows*19, 262)
+            'follower_motion_ih': follower_motion_ih_full.astype(np.float32),  # (num_windows*19, 262)
+            'relationship_features': relationship_features_full.astype(np.float32),  # (num_windows*19, 4)
+            'leader_tokens': leader_tokens_array,  # (num_windows,)
+            'follower_tokens': follower_tokens_array,  # (num_windows,)
+            'relationship_tokens': relationship_tokens_array,  # (num_windows,)
+            'root_quat_init_L': root_quat_init_L_frame0.astype(np.float32),  # (4,)
+            'root_pos_init_L': root_pos_init_L_frame0.astype(np.float32),  # (3,)
+            'root_quat_init_F': root_quat_init_F_frame0.astype(np.float32),  # (4,)
+            'root_pos_init_F': root_pos_init_F_frame0.astype(np.float32),  # (3,)
+        }
+    
+    def _convert_to_interhuman_and_tokenize(self, window_keypoints3d_L, window_rotmat_L, 
+                                             window_keypoints3d_F, window_rotmat_F):
+        """
+        Convert 20-frame window to InterHuman representation and tokenize.
+        Follows exact process from motion_representation/data/motion_dataset.py
+        
+        Args:
+            window_keypoints3d_L: (20, 22, 3) numpy array - Leader keypoints
+            window_rotmat_L: (20, 498) numpy array - Leader rotation matrices
+            window_keypoints3d_F: (20, 22, 3) numpy array - Follower keypoints
+            window_rotmat_F: (20, 498) numpy array - Follower rotation matrices
+        
+        Returns:
+            dict with keys:
+                - leader_motion_ih: (19, 262) numpy array - InterHuman canonicalized motion
+                - follower_motion_ih: (19, 262) numpy array
+                - relationship_features: (19, 4) numpy array - [w, z, x, z]
+                - leader_tokens: (1,) numpy array - VQ token indices
+                - follower_tokens: (1,) numpy array
+                - relationship_tokens: (1,) numpy array
+                - root_quat_init_L: (4,) numpy array - Frame 0 root quaternion
+                - root_pos_init_L: (3,) numpy array - Frame 0 root position
+                - root_quat_init_F: (4,) numpy array
+                - root_pos_init_F: (3,) numpy array
+        """
+        # Lazy load tokenizers if not already loaded
+        if self.interhuman_motion_tokenizer is None:
+            self._load_interhuman_tokenizers()
+        
+        # Import conversion functions from motion_representation
+        import sys
+        import os
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        motion_rep_path = os.path.join(project_root, 'Salsa-Agent', 'motion_representation')
+        if motion_rep_path not in sys.path:
+            sys.path.insert(0, motion_rep_path)
+        
+        from motion_representation.utils.relationship_features import (
+            salsa_to_interhuman, extract_interhuman_relationship_features
+        )
+        
+        device = self.args.device if hasattr(self.args, 'device') else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        
+        # Ensure inputs are numpy arrays
+        if isinstance(window_keypoints3d_L, torch.Tensor):
+            window_keypoints3d_L = window_keypoints3d_L.cpu().numpy()
+        if isinstance(window_rotmat_L, torch.Tensor):
+            window_rotmat_L = window_rotmat_L.cpu().numpy()
+        if isinstance(window_keypoints3d_F, torch.Tensor):
+            window_keypoints3d_F = window_keypoints3d_F.cpu().numpy()
+        if isinstance(window_rotmat_F, torch.Tensor):
+            window_rotmat_F = window_rotmat_F.cpu().numpy()
+        
+        # Step 1: Convert to InterHuman representation (following motion_dataset.py lines 491-497)
+        # Apply +90° rotation to reverse the -90° preprocessing rotation
+        motion_L_ih, root_quat_init_L, root_pos_init_L = salsa_to_interhuman(
+            window_keypoints3d_L, window_rotmat_L, rotation_deg=90
+        )  # (19, 262), (19, 4), (19, 3)
+        
+        motion_F_ih, root_quat_init_F, root_pos_init_F = salsa_to_interhuman(
+            window_keypoints3d_F, window_rotmat_F, rotation_deg=90
+        )  # (19, 262), (19, 4), (19, 3)
+        
+        # Step 2: Extract frame 0 root quaternions and positions (for relationship computation)
+        root_quat_init_L_frame0 = root_quat_init_L[0] if root_quat_init_L.ndim > 1 else root_quat_init_L  # (4,)
+        root_pos_init_L_frame0 = root_pos_init_L[0] if root_pos_init_L.ndim > 1 else root_pos_init_L  # (3,)
+        root_quat_init_F_frame0 = root_quat_init_F[0] if root_quat_init_F.ndim > 1 else root_quat_init_F  # (4,)
+        root_pos_init_F_frame0 = root_pos_init_F[0] if root_pos_init_F.ndim > 1 else root_pos_init_F  # (3,)
+        
+        # Step 3: Extract relationship features (following motion_dataset.py lines 513-522)
+        # CRITICAL: Pass copies to avoid in-place modification
+        relationship_features = extract_interhuman_relationship_features(
+            motion_L_ih.copy(), motion_F_ih.copy(),  # Make copies
+            root_quat_init_L_frame0, root_pos_init_L_frame0,
+            root_quat_init_F_frame0, root_pos_init_F_frame0,
+            root_quat_init_L_all=root_quat_init_L,  # (19, 4)
+            root_pos_init_L_all=root_pos_init_L,      # (19, 3)
+            root_quat_init_F_all=root_quat_init_F,    # (19, 4)
+            root_pos_init_F_all=root_pos_init_F,      # (19, 3)
+            return_aligned_follower=False
+        )  # (19, 4) - [w, z, x, z]
+        
+        # Step 4: Normalize motions and relationship features
+        # CRITICAL: Normalization must be applied before tokenization!
+        if self.interhuman_normalization_stats is not None:
+            mean_ih = torch.from_numpy(self.interhuman_normalization_stats['mean']).float()
+            std_ih = torch.from_numpy(self.interhuman_normalization_stats['std']).float()
+            epsilon = 1e-8
+            motion_L_ih_norm = (torch.from_numpy(motion_L_ih).float() - mean_ih) / (std_ih + epsilon)
+            motion_F_ih_norm = (torch.from_numpy(motion_F_ih).float() - mean_ih) / (std_ih + epsilon)
+            
+            # Debug: Check normalization is working (first sample only)
+            if not hasattr(self, '_normalization_debug_printed'):
+                print(f"\n[DEBUG] Normalization applied to InterHuman motion:")
+                print(f"  Original motion_L_ih range: [{motion_L_ih.min():.4f}, {motion_L_ih.max():.4f}]")
+                print(f"  Normalized motion_L_ih_norm range: [{motion_L_ih_norm.min():.4f}, {motion_L_ih_norm.max():.4f}]")
+                print(f"  Mean shape: {mean_ih.shape}, Std shape: {std_ih.shape}")
+                print(f"  Mean sample (first 5): {mean_ih[:5].numpy()}")
+                print(f"  Std sample (first 5): {std_ih[:5].numpy()}")
+                self._normalization_debug_printed = True
+        else:
+            print(f"\n[ERROR] InterHuman normalization stats are None! Motion will NOT be normalized before tokenization!")
+            print(f"  This will cause all samples to produce the same tokens!")
+            motion_L_ih_norm = torch.from_numpy(motion_L_ih).float()
+            motion_F_ih_norm = torch.from_numpy(motion_F_ih).float()
+        
+        if self.relationship_normalization_stats is not None:
+            mean_rel = torch.from_numpy(self.relationship_normalization_stats['mean']).float()
+            std_rel = torch.from_numpy(self.relationship_normalization_stats['std']).float()
+            epsilon = 1e-8
+            relationship_features_norm = (torch.from_numpy(relationship_features).float() - mean_rel) / (std_rel + epsilon)
+        else:
+            relationship_features_norm = torch.from_numpy(relationship_features).float()
+        
+        # Step 5: Tokenize using VQVAEs
+        # InterHuman motion tokenization: (19, 262) -> (1,) token
+        with torch.no_grad():
+            # Leader motion
+            motion_L_tensor = motion_L_ih_norm.unsqueeze(0).to(device)  # (1, 19, 262)
+            
+            # Debug: Check input to tokenizer (first sample only)
+            if not hasattr(self, '_tokenizer_input_debug_printed'):
+                print(f"\n[DEBUG] Input to motion tokenizer:")
+                print(f"  motion_L_tensor shape: {motion_L_tensor.shape}")
+                print(f"  motion_L_tensor range: [{motion_L_tensor.min():.4f}, {motion_L_tensor.max():.4f}]")
+                print(f"  motion_L_tensor mean: {motion_L_tensor.mean():.4f}, std: {motion_L_tensor.std():.4f}")
+                print(f"  motion_L_tensor sample (first frame, first 10 dims): {motion_L_tensor[0, 0, :10].cpu().numpy()}")
+                self._tokenizer_input_debug_printed = True
+            
+            _, leader_code_idx = self.interhuman_motion_tokenizer.inference_encode(motion_L_tensor)
+            # Handle different shapes: (1,) or (1, 1) -> flatten to (1,)
+            if leader_code_idx.dim() > 1:
+                leader_code_idx = leader_code_idx.flatten()
+            leader_tokens = leader_code_idx.cpu().numpy()  # (1,)
+            
+            # Follower motion
+            motion_F_tensor = motion_F_ih_norm.unsqueeze(0).to(device)  # (1, 19, 262)
+            _, follower_code_idx = self.interhuman_motion_tokenizer.inference_encode(motion_F_tensor)
+            if follower_code_idx.dim() > 1:
+                follower_code_idx = follower_code_idx.flatten()
+            follower_tokens = follower_code_idx.cpu().numpy()  # (1,)
+            
+            # Relationship tokenization: (19, 4) -> (1,) token
+            relationship_tensor = relationship_features_norm.unsqueeze(0).to(device)  # (1, 19, 4)
+            _, relationship_code_idx = self.relationship_tokenizer.inference_encode(relationship_tensor)
+            if relationship_code_idx.dim() > 1:
+                relationship_code_idx = relationship_code_idx.flatten()
+            relationship_tokens = relationship_code_idx.cpu().numpy()  # (1,)
+        
+        # Return all data
+        return {
+            'leader_motion_ih': motion_L_ih.astype(np.float32),  # (19, 262)
+            'follower_motion_ih': motion_F_ih.astype(np.float32),  # (19, 262)
+            'relationship_features': relationship_features.astype(np.float32),  # (19, 4)
+            'leader_tokens': leader_tokens.astype(np.int64),  # (1,)
+            'follower_tokens': follower_tokens.astype(np.int64),  # (1,)
+            'relationship_tokens': relationship_tokens.astype(np.int64),  # (1,)
+            'root_quat_init_L': root_quat_init_L_frame0.astype(np.float32),  # (4,)
+            'root_pos_init_L': root_pos_init_L_frame0.astype(np.float32),  # (3,)
+            'root_quat_init_F': root_quat_init_F_frame0.astype(np.float32),  # (4,)
+            'root_pos_init_F': root_pos_init_F_frame0.astype(np.float32),  # (3,)
+        }
 
     def _sample_from_clip_pair(self, vid: str, clip: dict) -> None:
         """Internal function to extract and write skeleton, audio and word data from provided clip.
@@ -579,6 +1218,9 @@ class DataPreprocessor:
         sample_vqtokens_list_F = []
         sample_ms_description_list_F = []
 
+        # InterHuman sample list
+        sample_interhuman_data_list = []  # List of dicts with InterHuman data and tokens
+
         # sample_audio_list_mels = []
         sample_audio_raw_list = []
         sample_audio_tokens_list = []
@@ -630,6 +1272,20 @@ class DataPreprocessor:
             sample_raw_euler_poses_F = clip_raw_euler_poses_F[start_idx:fin_idx]
             sample_raw_trans_F = clip_raw_trans_F[start_idx:fin_idx]
 
+            # Convert to InterHuman representation and tokenize
+            # Use sequence-level function that handles full sequence and tokenizes window by window
+            try:
+                interhuman_data = self._convert_to_interhuman_and_tokenize_sequence(
+                    sample_skeletons3d_L, sample_rotmat_L,
+                    sample_skeletons3d_F, sample_rotmat_F
+                )
+                sample_interhuman_data_list.append(interhuman_data)
+            except Exception as e:
+                print(f"Warning: Failed to convert to InterHuman for sample {i}: {e}")
+                import traceback
+                traceback.print_exc()
+                # Add None as placeholder to keep list aligned
+                sample_interhuman_data_list.append(None)
 
             sample_body_betas = None # clipt_body_betas
             sample_body_vertices = None # clip_body_vertices[start_idx:fin_idx]
@@ -734,7 +1390,7 @@ class DataPreprocessor:
             #     # signal = librosa.amplitude_to_db(signal)
 
 
-            # Extract dance moves labels
+            # Extract dance moves labels from annotation files
 
             motion_info = {'vid': vid,
                            'start_frame_no': start_idx,
@@ -742,48 +1398,12 @@ class DataPreprocessor:
                            'start_time': subdivision_start_time,
                            'end_time': subdivision_end_time}
 
-            def get_dance_moves(motion_info_x):
-                DD_vid = motion_info_x['vid']
-                get_moves = []
-                current_take = DD_vid  # [:15]
-                current_role = 'Follower' if 'follower' in DD_vid else 'Leader'
-                current_start_time, current_end_time = motion_info_x['start_time'], motion_info_x['end_time']
-
-                def time2seconds(timestamp):
-                    from datetime import datetime
-                    # timestamp = "00:00:00.000"
-                    time_obj = datetime.strptime(timestamp, "%H:%M:%S.%f")  # Parses timestamp
-                    total_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second + time_obj.microsecond / 1e6
-                    return total_seconds
-
-                # for i in range(len(self.Dance_moves_annot)):
-                #     temp = self.Dance_moves_annot[i]
-                #     if temp['ID'] in current_take and \
-                #             current_role in temp['role']:
-                #
-                #         # print(temp['role'])
-                #         if current_start_time >= time2seconds(temp['start_time']) and current_end_time <= time2seconds(
-                #                 temp['end_time']):
-                #             get_moves.append(self.Dance_moves_annot[i])
-                for i in range(len(self.Dance_moves_annot)):
-                    temp = self.Dance_moves_annot[i]
-                    if temp['ID'] in current_take and current_role in temp['role']:
-                        move_start_time = time2seconds(temp['start_time'])
-                        move_end_time = time2seconds(temp['end_time'])
-                        move_duration = move_end_time - move_start_time
-                        overlap_start = max(current_start_time, move_start_time)
-                        overlap_end = min(current_end_time, move_end_time)
-
-                        if overlap_end > overlap_start:  # Check if there is an overlap
-                            overlap_duration = overlap_end - overlap_start
-                            overlap_percentage = overlap_duration / move_duration
-
-                            if overlap_percentage > 0.6:  # Check if overlap is more than 60%
-                                get_moves.append(self.Dance_moves_annot[i])
-                return get_moves
-
-            # dance_moves = get_dance_moves(motion_info)
-            # motion_info['dance_moves'] = dance_moves
+            # Get annotations for this window
+            annotations = self._get_annotations_for_window(vid, subdivision_start_time, subdivision_end_time)
+            motion_info['dance_moves'] = annotations['moves']
+            motion_info['errors'] = annotations['errors']
+            motion_info['styling_leader'] = annotations['styling_leader']
+            motion_info['styling_follower'] = annotations['styling_follower']
 
 
             # Leader's
@@ -822,12 +1442,13 @@ class DataPreprocessor:
                         poses_rotmat_L, poses_rotmat_F, \
                         ms_description_L, ms_description_F, \
                         poses_vq_tokens_L, poses_vq_tokens_F, \
-                         audio_tokens, audio_raw, aux in \
+                         audio_tokens, audio_raw, aux, interhuman_data in \
                             zip(sample_skeleton3d_list_L, sample_skeleton3d_list_F,
                                 sample_rotmat_list_L, sample_rotmat_list_F,
                                 sample_ms_description_list_L, sample_ms_description_list_F,
                                 sample_vqtokens_list_L, sample_vqtokens_list_F,
-                                sample_audio_tokens_list, sample_audio_raw_list, aux_info):
+                                sample_audio_tokens_list, sample_audio_raw_list, aux_info,
+                                sample_interhuman_data_list):
 
                         poses_keypoints3d_L = np.asarray(poses_keypoints3d_L)
                         poses_rotmat_L = np.asarray(poses_rotmat_L)
@@ -842,9 +1463,16 @@ class DataPreprocessor:
                         # GPT_3_Embedding = np.array(GPT_3_Embedding)
                         # save
                         k = '{:010}'.format(self.n_out_samples).encode('ascii')
-                        v = [poses_keypoints3d_L, poses_rotmat_L, ms_description_L, poses_vqtokens_L,
-                             poses_keypoints3d_F, poses_rotmat_F, ms_description_F, poses_vqtokens_F,
-                             audio_tokens, audio_raw, aux]
+                        # Add InterHuman data if available
+                        if interhuman_data is not None:
+                            v = [poses_keypoints3d_L, poses_rotmat_L, ms_description_L, poses_vqtokens_L,
+                                 poses_keypoints3d_F, poses_rotmat_F, ms_description_F, poses_vqtokens_F,
+                                 audio_tokens, audio_raw, aux, interhuman_data]
+                        else:
+                            # Fallback: no InterHuman data (shouldn't happen, but handle gracefully)
+                            v = [poses_keypoints3d_L, poses_rotmat_L, ms_description_L, poses_vqtokens_L,
+                                 poses_keypoints3d_F, poses_rotmat_F, ms_description_F, poses_vqtokens_F,
+                                 audio_tokens, audio_raw, aux, None]
                         # v = [words, poses, audio_raws, audio_mels, aux, sentence_leve_latents, GPT_3_Embedding]
                         v = pyarrow.serialize(v).to_buffer()
                         txn.put(k, v)
@@ -855,13 +1483,14 @@ class DataPreprocessor:
                             HML3D_vec_L, HML3D_vec_F, \
                             ms_description_L, ms_description_F, \
                             poses_vq_tokens_L, poses_vq_tokens_F, \
-                            audio_tokens, audio_raw, aux in \
+                            audio_tokens, audio_raw, aux, interhuman_data in \
                             zip(sample_skeleton3d_list_L, sample_skeleton3d_list_F,
                                 sample_rotmat_list_L, sample_rotmat_list_F,
                                 sample_HML3D_vec_list_L, sample_HML3D_vec_list_F,
                                 sample_ms_description_list_L, sample_ms_description_list_F,
                                 sample_vqtokens_list_L, sample_vqtokens_list_F,
-                                sample_audio_tokens_list, sample_audio_raw_list, aux_info):
+                                sample_audio_tokens_list, sample_audio_raw_list, aux_info,
+                                sample_interhuman_data_list):
                         poses_keypoints3d_L = np.asarray(poses_keypoints3d_L)
                         poses_rotmat_L = np.asarray(poses_rotmat_L)
                         HML3D_vec_L = np.asarray(HML3D_vec_L)
@@ -877,9 +1506,16 @@ class DataPreprocessor:
                         # GPT_3_Embedding = np.array(GPT_3_Embedding)
                         # save
                         k = '{:010}'.format(self.n_out_samples).encode('ascii')
-                        v = [poses_keypoints3d_L, poses_rotmat_L, HML3D_vec_L, ms_description_L, poses_vqtokens_L,
-                             poses_keypoints3d_F, poses_rotmat_F, HML3D_vec_F, ms_description_F, poses_vqtokens_F,
-                             audio_tokens, audio_raw, aux]
+                        # Add InterHuman data if available
+                        if interhuman_data is not None:
+                            v = [poses_keypoints3d_L, poses_rotmat_L, HML3D_vec_L, ms_description_L, poses_vqtokens_L,
+                                 poses_keypoints3d_F, poses_rotmat_F, HML3D_vec_F, ms_description_F, poses_vqtokens_F,
+                                 audio_tokens, audio_raw, aux, interhuman_data]
+                        else:
+                            # Fallback: no InterHuman data
+                            v = [poses_keypoints3d_L, poses_rotmat_L, HML3D_vec_L, ms_description_L, poses_vqtokens_L,
+                                 poses_keypoints3d_F, poses_rotmat_F, HML3D_vec_F, ms_description_F, poses_vqtokens_F,
+                                 audio_tokens, audio_raw, aux, None]
                         # v = [words, poses, audio_raws, audio_mels, aux, sentence_leve_latents, GPT_3_Embedding]
                         v = pyarrow.serialize(v).to_buffer()
                         txn.put(k, v)
@@ -888,11 +1524,17 @@ class DataPreprocessor:
         print()
 
 # Todo -----------------------------------------------------------------
+# Pair → Proficiency per Dataset README (Dataset/compas3d/README.md table).
 PAIR2LEVEL = {
-    f"pair{i}": level
-    for i, level in zip(range(1, 10), ["beginner", "intermediate", "beginner",
-                                       "intermediate", "professional", "intermediate",
-                                       "professional", "beginner", "professional"], )
+    "pair1": "beginner",
+    "pair2": "intermediate",
+    "pair3": "beginner",
+    "pair4": "intermediate",
+    "pair5": "professional",
+    "pair6": "intermediate",
+    "pair7": "professional",
+    "pair8": "beginner",
+    "pair9": "professional",
 }
 
 SALSA_CAPTIONS = {
@@ -953,6 +1595,7 @@ class Salsa_Dataset(Dataset):
         n_poses: int,
         subdivision_stride: int,
         pose_resampling_fps: int,
+        cache_suffix: str = "_cache",
         # data_mean: list[float],
         # data_std: list[float],
     ):
@@ -982,7 +1625,7 @@ class Salsa_Dataset(Dataset):
         self.args = args
 
         print("Reading data '{}'...".format(lmdb_dir))
-        preloaded_dir = lmdb_dir + "_cache"
+        preloaded_dir = lmdb_dir + cache_suffix
         if self.args.is_MDM:
             preloaded_dir += '_MDM'
         if not os.path.exists(preloaded_dir): # TODO
@@ -1037,14 +1680,30 @@ class Salsa_Dataset(Dataset):
 
             # pose_seq_keypoints3d, pose_seq_rotmat, vq_tokens, aux_info = sample
             # pose_seq_keypoints3d, pose_seq_rotmat, ms_desc_bins, vq_tokens, audio_tokens, aux_info = sample
+            # Handle both old cache format (without InterHuman) and new format (with InterHuman)
+            interhuman_data = None
             if not self.args.is_MDM:
-                poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
-                 poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
-                 audio_tokens, audio_raw, aux_info = sample
+                if len(sample) == 12:
+                    # New format with InterHuman data
+                    poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
+                     poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
+                     audio_tokens, audio_raw, aux_info, interhuman_data = sample
+                else:
+                    # Old format without InterHuman data
+                    poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
+                     poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
+                     audio_tokens, audio_raw, aux_info = sample
             if self.args.is_MDM:
-                poses_keypoints3d_L, poses_rotmat_L, HML3D_L, ms_desc_L, vq_tokens_L, \
-                    poses_keypoints3d_F, poses_rotmat_F, HML3D_F, ms_des_F, vq_tokens_F, \
-                    audio_tokens, audio_raw, aux_info = sample
+                if len(sample) == 14:
+                    # New format with InterHuman data
+                    poses_keypoints3d_L, poses_rotmat_L, HML3D_L, ms_desc_L, vq_tokens_L, \
+                        poses_keypoints3d_F, poses_rotmat_F, HML3D_F, ms_des_F, vq_tokens_F, \
+                        audio_tokens, audio_raw, aux_info, interhuman_data = sample
+                else:
+                    # Old format without InterHuman data
+                    poses_keypoints3d_L, poses_rotmat_L, HML3D_L, ms_desc_L, vq_tokens_L, \
+                        poses_keypoints3d_F, poses_rotmat_F, HML3D_F, ms_des_F, vq_tokens_F, \
+                        audio_tokens, audio_raw, aux_info = sample
                 HML3D_L = torch.from_numpy(HML3D_L).to(self.args.device)
                 HML3D_F = torch.from_numpy(HML3D_F).to(self.args.device)
 
@@ -1060,11 +1719,30 @@ class Salsa_Dataset(Dataset):
 
         audio_tokens = torch.from_numpy(audio_tokens).to(self.args.device)
 
+        # Convert InterHuman data to tensors if available
+        if interhuman_data is not None:
+            interhuman_data_tensors = {
+                'leader_motion_ih': torch.from_numpy(interhuman_data['leader_motion_ih']).float(),
+                'follower_motion_ih': torch.from_numpy(interhuman_data['follower_motion_ih']).float(),
+                'relationship_features': torch.from_numpy(interhuman_data['relationship_features']).float(),
+                'leader_tokens': torch.from_numpy(interhuman_data['leader_tokens']).long(),
+                'follower_tokens': torch.from_numpy(interhuman_data['follower_tokens']).long(),
+                'relationship_tokens': torch.from_numpy(interhuman_data['relationship_tokens']).long(),
+                'root_quat_init_L': torch.from_numpy(interhuman_data['root_quat_init_L']).float(),
+                'root_pos_init_L': torch.from_numpy(interhuman_data['root_pos_init_L']).float(),
+                'root_quat_init_F': torch.from_numpy(interhuman_data['root_quat_init_F']).float(),
+                'root_pos_init_F': torch.from_numpy(interhuman_data['root_pos_init_F']).float(),
+            }
+        else:
+            interhuman_data_tensors = None
+
         # we need to return a one str here.
+        # Return format: (existing data..., interhuman_data)
+        # interhuman_data is None for old cache entries, dict for new entries
         if not self.args.is_MDM:
-            return level, '-->'.join(ms_desc_L), '-->'.join(ms_des_F), vq_tokens_L, vq_tokens_F, audio_tokens, aux_info
+            return level, '-->'.join(ms_desc_L), '-->'.join(ms_des_F), vq_tokens_L, vq_tokens_F, audio_tokens, aux_info, interhuman_data_tensors
         if self.args.is_MDM:
-            return level, HML3D_L, vq_tokens_L, HML3D_F, vq_tokens_F, audio_tokens, aux_info
+            return level, HML3D_L, vq_tokens_L, HML3D_F, vq_tokens_F, audio_tokens, aux_info, interhuman_data_tensors
     def create_similarity_dataset(self, pickle_file: str, labelstxt_file: str) -> None:
         """TODO"""
         # Todo: 1. Thos function gets the pickle file that I made in the clustering.py(or flowgmm) process as well

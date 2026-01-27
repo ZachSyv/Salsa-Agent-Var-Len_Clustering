@@ -43,17 +43,43 @@ class LMDBLoader:
         self.is_MDM = is_MDM
         
         # Auto-detect cache directory like Salsa_Dataset does
+        # Try multiple possible cache directory names
+        possible_cache_dirs = []
+        
+        # Standard cache directory
         preloaded_dir = lmdb_dir + "_cache"
         if self.is_MDM:
             preloaded_dir += '_MDM'
+        possible_cache_dirs.append(preloaded_dir)
         
-        # Check if cache exists, if not use original directory
-        if os.path.exists(preloaded_dir):
-            debug_print(f"Found cached/processed LMDB at: {preloaded_dir}")
-            self.lmdb_dir = preloaded_dir
+        # Also try with 'dd' subdirectory (from DataPreprocessor)
+        parent_dir = os.path.dirname(lmdb_dir)
+        base_name = os.path.basename(lmdb_dir)
+        dd_cache_dir = os.path.join(parent_dir, 'dd', base_name + '_cache')
+        if self.is_MDM:
+            dd_cache_dir += '_MDM'
+        possible_cache_dirs.append(dd_cache_dir)
+        
+        # Also try interhuman cache
+        interhuman_cache_dir = os.path.join(parent_dir, 'dd', base_name + '_interhuman_20frames_cache')
+        possible_cache_dirs.append(interhuman_cache_dir)
+        
+        # Check if any cache exists
+        found_cache = None
+        for cache_dir in possible_cache_dirs:
+            if os.path.exists(cache_dir):
+                found_cache = cache_dir
+                debug_print(f"Found cached/processed LMDB at: {found_cache}")
+                break
+        
+        if found_cache:
+            self.lmdb_dir = found_cache
         else:
-            debug_print(f"Cache not found at {preloaded_dir}, using original directory: {lmdb_dir}")
-            debug_print("Note: Original directory contains raw video data. You may need to process it first.")
+            debug_print(f"Cache not found in any of these locations:")
+            for cd in possible_cache_dirs:
+                debug_print(f"  - {cd}")
+            debug_print(f"Using original directory: {lmdb_dir}")
+            debug_print("WARNING: Original directory may contain raw video data. You may need to process it first.")
             self.lmdb_dir = lmdb_dir
         
         self.lmdb_env = lmdb.open(self.lmdb_dir, readonly=True, lock=False)
@@ -83,22 +109,37 @@ class LMDBLoader:
             debug_print(f"Sample length: {sample_len}, expected: {12 if self.is_MDM else 10}")
             
             # Try to unpack based on format
+            # New format includes InterHuman data as last element (optional, backward compatible)
             if self.is_MDM:
-                # MDM format: 13 elements (added audio_raw)
-                if sample_len != 13:
-                    debug_print(f"MDM format: expected 13 elements, got {sample_len}")
+                # MDM format: 13 elements (old) or 14 elements (new with InterHuman)
+                if sample_len == 13:
+                    # Old format without InterHuman
+                    poses_keypoints3d_L, poses_rotmat_L, HML3D_L, ms_desc_L, vq_tokens_L, \
+                        poses_keypoints3d_F, poses_rotmat_F, HML3D_F, ms_des_F, vq_tokens_F, \
+                        audio_tokens, audio_raw, aux_info = sample
+                elif sample_len == 14:
+                    # New format with InterHuman
+                    poses_keypoints3d_L, poses_rotmat_L, HML3D_L, ms_desc_L, vq_tokens_L, \
+                        poses_keypoints3d_F, poses_rotmat_F, HML3D_F, ms_des_F, vq_tokens_F, \
+                        audio_tokens, audio_raw, aux_info, interhuman_data = sample
+                else:
+                    debug_print(f"MDM format: expected 13 or 14 elements, got {sample_len}")
                     return False
-                poses_keypoints3d_L, poses_rotmat_L, HML3D_L, ms_desc_L, vq_tokens_L, \
-                    poses_keypoints3d_F, poses_rotmat_F, HML3D_F, ms_des_F, vq_tokens_F, \
-                    audio_tokens, audio_raw, aux_info = sample
             else:
-                # Non-MDM format: 11 elements (added audio_raw)
-                if sample_len != 11:
-                    debug_print(f"Non-MDM format: expected 11 elements, got {sample_len}")
+                # Non-MDM format: 11 elements (old) or 12 elements (new with InterHuman)
+                if sample_len == 11:
+                    # Old format without InterHuman
+                    poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
+                     poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
+                     audio_tokens, audio_raw, aux_info = sample
+                elif sample_len == 12:
+                    # New format with InterHuman
+                    poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
+                     poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
+                     audio_tokens, audio_raw, aux_info, interhuman_data = sample
+                else:
+                    debug_print(f"Non-MDM format: expected 11 or 12 elements, got {sample_len}")
                     return False
-                poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
-                 poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
-                 audio_tokens, audio_raw, aux_info = sample
             
             # Check that aux_info is a dict (basic validation)
             if not isinstance(aux_info, dict):
@@ -161,11 +202,21 @@ class LMDBLoader:
                         'aux_info': sample.get('aux_info') or sample.get('aux'),
                         'HML3D_L': sample.get('HML3D_L') or sample.get('HML3D_vec_L'),
                         'HML3D_F': sample.get('HML3D_F') or sample.get('HML3D_vec_F'),
+                        'interhuman_data': sample.get('interhuman_data'),  # New: InterHuman data
                     }
                     return result
                 else:
                     # Dict with unexpected structure - print keys for debugging
                     debug_print(f"Dict has unexpected keys: {list(sample.keys())}")
+                    # Check if this is raw LMDB format (vid, clips)
+                    if 'vid' in sample and 'clips' in sample:
+                        raise ValueError(
+                            f"Sample at index {idx} appears to be in raw LMDB format (keys: {list(sample.keys())}).\n"
+                            f"This visualization app requires processed cache data.\n"
+                            f"Please load from the processed cache directory (usually ends with '_cache').\n"
+                            f"Current directory: {self.lmdb_dir}\n"
+                            f"Try: {self.lmdb_dir}_cache or {self.lmdb_dir}_cache_MDM (if MDM format)"
+                        )
                     # Try to see if it's a list/tuple inside
                     if len(sample) == 2:
                         debug_print(f"Dict has 2 items, checking values...")
@@ -175,22 +226,44 @@ class LMDBLoader:
             
             # Validate sample structure (for tuple/list format)
             if not self._is_valid_sample(sample):
-                raise ValueError(f"Sample at index {idx} has invalid structure (got {len(sample) if sample else 0} elements, expected {12 if self.is_MDM else 10})")
+                raise ValueError(f"Sample at index {idx} has invalid structure (got {len(sample) if sample else 0} elements, expected {13 or 14 if self.is_MDM else 11 or 12})")
             
             debug_print("Sample validation passed, unpacking...")
         
+        # Handle both old and new formats (with/without InterHuman)
+        interhuman_data = None
+        sample_len = len(sample)
+        
         if not self.is_MDM:
-            poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
-             poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
-             audio_tokens, audio_raw, aux_info = sample
+            if sample_len == 11:
+                # Old format without InterHuman
+                poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
+                 poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
+                 audio_tokens, audio_raw, aux_info = sample
+            elif sample_len == 12:
+                # New format with InterHuman
+                poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
+                 poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
+                 audio_tokens, audio_raw, aux_info, interhuman_data = sample
+            else:
+                raise ValueError(f"Unexpected sample length: {sample_len} (expected 11 or 12 for non-MDM)")
             HML3D_L = None
             HML3D_F = None
         else:
-            poses_keypoints3d_L, poses_rotmat_L, HML3D_L, ms_desc_L, vq_tokens_L, \
-                poses_keypoints3d_F, poses_rotmat_F, HML3D_F, ms_des_F, vq_tokens_F, \
-                audio_tokens, audio_raw, aux_info = sample
+            if sample_len == 13:
+                # Old format without InterHuman
+                poses_keypoints3d_L, poses_rotmat_L, HML3D_L, ms_desc_L, vq_tokens_L, \
+                    poses_keypoints3d_F, poses_rotmat_F, HML3D_F, ms_des_F, vq_tokens_F, \
+                    audio_tokens, audio_raw, aux_info = sample
+            elif sample_len == 14:
+                # New format with InterHuman
+                poses_keypoints3d_L, poses_rotmat_L, HML3D_L, ms_desc_L, vq_tokens_L, \
+                    poses_keypoints3d_F, poses_rotmat_F, HML3D_F, ms_des_F, vq_tokens_F, \
+                    audio_tokens, audio_raw, aux_info, interhuman_data = sample
+            else:
+                raise ValueError(f"Unexpected sample length: {sample_len} (expected 13 or 14 for MDM)")
         
-        return {
+        result = {
             'poses_keypoints3d_L': poses_keypoints3d_L,
             'poses_rotmat_L': poses_rotmat_L,
             'poses_keypoints3d_F': poses_keypoints3d_F,
@@ -204,7 +277,9 @@ class LMDBLoader:
             'aux_info': aux_info,
             'HML3D_L': HML3D_L,
             'HML3D_F': HML3D_F,
+            'interhuman_data': interhuman_data,  # None for old cache entries, dict for new entries
         }
+        return result
     
     def close(self):
         """Close the LMDB environment."""
@@ -911,7 +986,8 @@ def decode_audio_tokens(audio_tokens: np.ndarray, wavtokenizer=None, device='cpu
     Decode audio tokens to audio waveform.
     
     Args:
-        audio_tokens: Audio token array
+        audio_tokens: Audio token array. Stored tokens are often (L,) or (K, L).
+                      WavTokenizer expects (K, L) or (K, B, L) with K=codebooks, L=seq length.
         wavtokenizer: WavTokenizer instance (optional)
         device: Device to run decoding on
         
@@ -924,14 +1000,42 @@ def decode_audio_tokens(audio_tokens: np.ndarray, wavtokenizer=None, device='cpu
     
     try:
         if isinstance(audio_tokens, np.ndarray):
-            audio_tokens = torch.from_numpy(audio_tokens)
+            audio_tokens = torch.from_numpy(audio_tokens).long()
+        else:
+            audio_tokens = audio_tokens.long()
         
-        # Move to device
-        audio_tokens = audio_tokens.to(device)
+        # Use model device (wavtokenizer lives there)
+        model_device = next(wavtokenizer.parameters()).device
+        audio_tokens = audio_tokens.to(model_device)
+        
+        # Reshape to (K, L) format expected by codes_to_features.
+        # According to WavTokenizer README: audio_tokens can be [n_q,1,t] or [n_q,t]
+        # Our config uses num_quantizers=1 (nq1), so K=1.
+        # After squeeze() in dataloader, stored tokens are typically (L,) or (1, L).
+        if audio_tokens.dim() == 1:
+            # (L,) -> (1, L) i.e. single codebook, single sequence
+            audio_tokens = audio_tokens.unsqueeze(0)
+        elif audio_tokens.dim() == 2:
+            # Could be (1, L) or (L, 1) or (B, L) where B>1
+            # codes_to_features expects (K, L) or (K, B, L)
+            # If shape[0] == 1, it's already (1, L) - correct format
+            # If shape[1] == 1, it's (L, 1) - transpose to (1, L)
+            # If both > 1, assume (B, L) and we need to add codebook dim: (1, B, L)
+            if audio_tokens.shape[0] == 1:
+                # Already (1, L) - correct format
+                pass
+            elif audio_tokens.shape[1] == 1:
+                # (L, 1) -> transpose to (1, L)
+                audio_tokens = audio_tokens.t()
+            else:
+                # (B, L) where B>1 - add codebook dimension: (1, B, L)
+                # This shouldn't happen for stored tokens (B should be 1), but handle it
+                audio_tokens = audio_tokens.unsqueeze(0)
         
         # Decode using wavtokenizer: codes -> features -> audio
         features = wavtokenizer.codes_to_features(audio_tokens)
-        audio = wavtokenizer.decode(features)
+        bandwidth_id = torch.tensor([0], device=model_device, dtype=torch.long)
+        audio = wavtokenizer.decode(features, bandwidth_id=bandwidth_id)
         
         # Convert to numpy and squeeze batch dimension if present
         audio = audio.detach().cpu().numpy()
