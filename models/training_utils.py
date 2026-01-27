@@ -916,3 +916,263 @@ def build_random_training_instance_salsa_prompt(
 
     return input_ids, target_ids, task
 
+
+# -----------------------------------------------------------------------------
+# InterHuman Salsa prompt builder (pure text; tokenizer/embedding later)
+# -----------------------------------------------------------------------------
+# Single source of truth for delimiters so we never write incorrect tokens.
+INTERHUMAN_PROMPT_DELIMITERS = {
+    "leader_motion_open": "<LeaderMotion>",
+    "leader_motion_close": "</LeaderMotion>",
+    "follower_motion_open": "<FollowerMotion>",
+    "follower_motion_close": "</FollowerMotion>",
+    "relationship_open": "<Relationship>",
+    "relationship_close": "</Relationship>",
+    "audio_open": "<AudioTokens>",
+    "audio_close": "</AudioTokens>",
+    "audio_token": "<Audio_{}>",  # format with int
+    "ih_token": "<IH_{}>",   # format with int: IH_0, IH_1, ...
+    "rel_token": "<Rel_{}>", # format with int: Rel_0, Rel_1, ...
+    "response_header": "### Response:\n",  # then label + open token of response modality
+    "label_leader_motion": "Leader motion: ",
+    "label_follower_motion": "Follower motion: ",
+    "label_relationship": "Relationship: ",
+    "label_music": "Music: ",
+    "instruction_leader_rel_to_follower": "### Instruction:\nGiven salsa leader motion and relationship, predict salsa follower motion.\n\n",
+    "instruction_leader_rel_to_follower_audio": "### Instruction:\nGiven salsa leader motion, relationship, and music, predict salsa follower motion.\n\n",
+    "instruction_follower_rel_to_leader": "### Instruction:\nGiven salsa follower motion and relationship, predict salsa leader motion.\n\n",
+    "instruction_follower_rel_to_leader_audio": "### Instruction:\nGiven salsa follower motion, relationship, and music, predict salsa leader motion.\n\n",
+    "instruction_caption_leader_rel_to_follower": "### Instruction:\nGiven the salsa description, leader motion, and relationship, predict salsa follower motion.\n\n",
+    "instruction_caption_leader_rel_to_follower_audio": "### Instruction:\nGiven the salsa description, leader motion, relationship, and music, predict salsa follower motion.\n\n",
+    "instruction_pair_to_relationship": "### Instruction:\nGiven salsa leader and follower motion, predict the relationship between them.\n\n",
+    "instruction_pair_to_relationship_audio": "### Instruction:\nGiven salsa leader and follower motion and music, predict the relationship between them.\n\n",
+    "instruction_caption_follower_rel_to_leader": "### Instruction:\nGiven the salsa description, follower motion, and relationship, predict salsa leader motion.\n\n",
+    "instruction_caption_follower_rel_to_leader_audio": "### Instruction:\nGiven the salsa description, follower motion, relationship, and music, predict salsa leader motion.\n\n",
+    "instruction_caption_to_leader": "### Instruction:\nGenerate salsa leader motion from the description.\n\n",
+    "instruction_caption_to_leader_audio": "### Instruction:\nGenerate salsa leader motion from the description and music.\n\n",
+    "instruction_caption_to_follower": "### Instruction:\nGenerate salsa follower motion from the description.\n\n",
+    "instruction_caption_to_follower_audio": "### Instruction:\nGenerate salsa follower motion from the description and music.\n\n",
+    "instruction_leader_to_follower": "### Instruction:\nGiven salsa leader motion, predict salsa follower motion.\n\n",
+    "instruction_leader_to_follower_audio": "### Instruction:\nGiven salsa leader motion and music, predict salsa follower motion.\n\n",
+    "instruction_follower_to_leader": "### Instruction:\nGiven salsa follower motion, predict salsa leader motion.\n\n",
+    "instruction_follower_to_leader_audio": "### Instruction:\nGiven salsa follower motion and music, predict salsa leader motion.\n\n",
+    "instruction_motion_completion_leader": "### Instruction:\nGiven a partial salsa leader motion, complete the motion.\n\n",
+    "instruction_motion_completion_leader_audio": "### Instruction:\nGiven a partial salsa leader motion and music, complete the motion.\n\n",
+    "instruction_motion_completion_follower": "### Instruction:\nGiven a partial salsa follower motion, complete the motion.\n\n",
+    "instruction_motion_completion_follower_audio": "### Instruction:\nGiven a partial salsa follower motion and music, complete the motion.\n\n",
+    "input_section": "### Input:\n",
+    "moves_section": "### Moves in this window:\n",
+    "system_prompt": (
+        "Below is an instruction that describes a task, paired with an input that provides further context. "
+        "Write a response that appropriately completes the request.\n\n"
+    ),
+}
+
+# Canonical list of InterHuman Salsa tasks (for UI, training, and validation).
+# Excludes motionscript-based tasks; all support optional audio via include_audio.
+INTERHUMAN_TASKS = [
+    "leader_rel_to_follower",
+    "follower_rel_to_leader",
+    "caption_leader_rel_to_follower",
+    "caption_follower_rel_to_leader",
+    "pair_to_relationship",
+    "caption_to_leader",
+    "caption_to_follower",
+    "leader_to_follower",
+    "follower_to_leader",
+    "motion_completion_leader",
+    "motion_completion_follower",
+]
+
+
+def _format_move_summary_for_prompt(move_annotations, max_chars=200):
+    """Build a short move summary from annotation dicts for use in prompt text."""
+    if not move_annotations:
+        return ""
+    parts = []
+    for m in move_annotations:
+        mc = m.get("move_class") or "move"
+        desc = (m.get("description") or "")[:60]
+        if desc:
+            parts.append(f"{mc}: {desc}")
+        else:
+            parts.append(mc)
+    s = "; ".join(parts)
+    return s[:max_chars] + ("..." if len(s) > max_chars else "")
+
+
+def build_prompt_interhuman_salsa(
+    leader_tokens,
+    follower_tokens,
+    relationship_tokens,
+    task="leader_rel_to_follower",
+    move_annotations=None,
+    level=None,
+    caption=None,
+    audio_tokens=None,
+    include_audio=False,
+    completion_split_ratio=0.3,
+):
+    """
+    Build prompt and target as pure text for InterHuman Salsa representation.
+    Uses INTERHUMAN_PROMPT_DELIMITERS so delimiters stay consistent everywhere.
+
+    Args:
+        leader_tokens: list/int array of InterHuman motion token ids
+        follower_tokens: list/int array of InterHuman motion token ids
+        relationship_tokens: list/int array of Relationship token ids
+        task: one of INTERHUMAN_TASKS
+        move_annotations: optional list of dicts with move_class, description (for caption task)
+        level: optional str, e.g. "beginner"
+        caption: optional str; if None and task is caption_*, built from level + move summary
+        audio_tokens: optional list/int array of audio token ids; used when include_audio=True
+        include_audio: if True and audio_tokens provided, appends audio block to input and uses _audio instruction
+        completion_split_ratio: for motion_completion_* tasks, fraction of tokens used as input (default 0.3)
+
+    Returns:
+        (prompt_text, target_text) both strings
+    """
+    D = INTERHUMAN_PROMPT_DELIMITERS
+    leader_tokens = list(leader_tokens) if hasattr(leader_tokens, "__iter__") and not isinstance(leader_tokens, str) else []
+    follower_tokens = list(follower_tokens) if hasattr(follower_tokens, "__iter__") and not isinstance(follower_tokens, str) else []
+    relationship_tokens = list(relationship_tokens) if hasattr(relationship_tokens, "__iter__") and not isinstance(relationship_tokens, str) else []
+    _audio_list = []
+    if audio_tokens is not None and hasattr(audio_tokens, "__iter__") and not isinstance(audio_tokens, str):
+        _audio_list = list(audio_tokens)
+    use_audio = include_audio and len(_audio_list) > 0
+
+    def fmt_leader():
+        return D["leader_motion_open"] + " " + " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
+
+    def fmt_follower():
+        return D["follower_motion_open"] + " " + " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
+
+    def fmt_relationship():
+        return D["relationship_open"] + " " + " ".join(D["rel_token"].format(int(t)) for t in relationship_tokens) + " " + D["relationship_close"]
+
+    def fmt_audio():
+        return D["audio_open"] + " " + " ".join(D["audio_token"].format(int(t)) for t in _audio_list) + " " + D["audio_close"]
+
+    # Order: caption/texts → audio → input motion → input relation. Each block gets a textual label.
+    def build_input_body(caption_txt=None, audio_block=None, motion_blocks=None, relation_block=None):
+        parts = []
+        if caption_txt:
+            parts.append(caption_txt.strip())
+        if audio_block:
+            parts.append(D["label_music"] + audio_block)
+        for label, content in motion_blocks or []:
+            parts.append(label + content)
+        if relation_block:
+            label, content = relation_block
+            parts.append(label + content)
+        return "\n\n".join(parts) + "\n\n"
+
+    if task == "leader_rel_to_follower":
+        instruction = D.get("instruction_leader_rel_to_follower_audio", D["instruction_leader_rel_to_follower"]) if use_audio else D["instruction_leader_rel_to_follower"]
+        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader())], relation_block=(D["label_relationship"], fmt_relationship()))
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
+
+    elif task == "follower_rel_to_leader":
+        instruction = D.get("instruction_follower_rel_to_leader_audio", D["instruction_follower_rel_to_leader"]) if use_audio else D["instruction_follower_rel_to_leader"]
+        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], fmt_follower())], relation_block=(D["label_relationship"], fmt_relationship()))
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
+
+    elif task == "caption_leader_rel_to_follower":
+        instruction = D.get("instruction_caption_leader_rel_to_follower_audio", D["instruction_caption_leader_rel_to_follower"]) if use_audio else D["instruction_caption_leader_rel_to_follower"]
+        if caption is None:
+            caption_parts = []
+            if level:
+                caption_parts.append(f"Level: {level}.")
+            move_summary = _format_move_summary_for_prompt(move_annotations or [])
+            if move_summary:
+                caption_parts.append(f"Moves: {move_summary}")
+            caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
+        input_body = build_input_body(caption_txt=caption.strip(), audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader())], relation_block=(D["label_relationship"], fmt_relationship()))
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
+
+    elif task == "caption_follower_rel_to_leader":
+        instruction = D.get("instruction_caption_follower_rel_to_leader_audio", D["instruction_caption_follower_rel_to_leader"]) if use_audio else D["instruction_caption_follower_rel_to_leader"]
+        if caption is None:
+            caption_parts = []
+            if level:
+                caption_parts.append(f"Level: {level}.")
+            move_summary = _format_move_summary_for_prompt(move_annotations or [])
+            if move_summary:
+                caption_parts.append(f"Moves: {move_summary}")
+            caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
+        input_body = build_input_body(caption_txt=caption.strip(), audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], fmt_follower())], relation_block=(D["label_relationship"], fmt_relationship()))
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
+
+    elif task == "pair_to_relationship":
+        instruction = D.get("instruction_pair_to_relationship_audio", D["instruction_pair_to_relationship"]) if use_audio else D["instruction_pair_to_relationship"]
+        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader()), (D["label_follower_motion"], fmt_follower())])
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_relationship"] + D["relationship_open"] + " "
+        target_text = " ".join(D["rel_token"].format(int(t)) for t in relationship_tokens) + " " + D["relationship_close"]
+
+    elif task == "caption_to_leader":
+        instruction = D.get("instruction_caption_to_leader_audio", D["instruction_caption_to_leader"]) if use_audio else D["instruction_caption_to_leader"]
+        if caption is None:
+            caption_parts = []
+            if level:
+                caption_parts.append(f"Level: {level}.")
+            move_summary = _format_move_summary_for_prompt(move_annotations or [])
+            if move_summary:
+                caption_parts.append(f"Moves: {move_summary}")
+            caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
+        input_body = build_input_body(caption_txt=caption.strip(), audio_block=fmt_audio() if use_audio else None)
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
+
+    elif task == "caption_to_follower":
+        instruction = D.get("instruction_caption_to_follower_audio", D["instruction_caption_to_follower"]) if use_audio else D["instruction_caption_to_follower"]
+        if caption is None:
+            caption_parts = []
+            if level:
+                caption_parts.append(f"Level: {level}.")
+            move_summary = _format_move_summary_for_prompt(move_annotations or [])
+            if move_summary:
+                caption_parts.append(f"Moves: {move_summary}")
+            caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
+        input_body = build_input_body(caption_txt=caption.strip(), audio_block=fmt_audio() if use_audio else None)
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
+
+    elif task == "leader_to_follower":
+        instruction = D.get("instruction_leader_to_follower_audio", D["instruction_leader_to_follower"]) if use_audio else D["instruction_leader_to_follower"]
+        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader())])
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
+
+    elif task == "follower_to_leader":
+        instruction = D.get("instruction_follower_to_leader_audio", D["instruction_follower_to_leader"]) if use_audio else D["instruction_follower_to_leader"]
+        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], fmt_follower())])
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
+
+    elif task == "motion_completion_leader":
+        instruction = D.get("instruction_motion_completion_leader_audio", D["instruction_motion_completion_leader"]) if use_audio else D["instruction_motion_completion_leader"]
+        n = max(1, int(len(leader_tokens) * completion_split_ratio))
+        partial_tokens, rest_tokens = leader_tokens[:n], leader_tokens[n:]
+        partial_str = D["leader_motion_open"] + " " + " ".join(D["ih_token"].format(int(t)) for t in partial_tokens) + " " + D["leader_motion_close"]
+        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], partial_str)])
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in rest_tokens) + " " + D["leader_motion_close"]
+
+    elif task == "motion_completion_follower":
+        instruction = D.get("instruction_motion_completion_follower_audio", D["instruction_motion_completion_follower"]) if use_audio else D["instruction_motion_completion_follower"]
+        n = max(1, int(len(follower_tokens) * completion_split_ratio))
+        partial_tokens, rest_tokens = follower_tokens[:n], follower_tokens[n:]
+        partial_str = D["follower_motion_open"] + " " + " ".join(D["ih_token"].format(int(t)) for t in partial_tokens) + " " + D["follower_motion_close"]
+        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], partial_str)])
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in rest_tokens) + " " + D["follower_motion_close"]
+
+    else:
+        raise ValueError(f"Unknown task: {task}. Use one of: {INTERHUMAN_TASKS}")
+
+    return prompt_text, target_text
+

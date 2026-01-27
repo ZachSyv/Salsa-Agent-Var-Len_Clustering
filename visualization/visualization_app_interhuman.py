@@ -3610,7 +3610,48 @@ def create_interface():
                         search_video = gr.Video(label="Visualization")
                         search_info = gr.Textbox(label="Sample Info", lines=5, interactive=False)
             
-            # Tab 6: Legacy Visualization
+            # Tab 6: Example Prompts (InterHuman pipeline)
+            with gr.Tab("📝 Example-Prompts"):
+                gr.Markdown("### InterHuman prompt preview – use the **Sample Index** at the top, pick a task, then click Generate.")
+                with gr.Row():
+                    prompts_task = gr.Dropdown(
+                        label="Task",
+                        choices=[
+                            "Leader + Rel → Follower",
+                            "Follower + Rel → Leader",
+                            "Caption + Leader + Rel → Follower",
+                            "Caption + Follower + Rel → Leader",
+                            "Pair (Leader+Follower) → Relationship",
+                            "Caption → Leader",
+                            "Caption → Follower",
+                            "Leader → Follower",
+                            "Follower → Leader",
+                            "Motion completion (Leader)",
+                            "Motion completion (Follower)",
+                        ],
+                        value="Leader + Rel → Follower"
+                    )
+                    prompts_include_audio = gr.Checkbox(label="Include audio", value=False)
+                    prompts_btn = gr.Button("Generate Prompts", variant="primary")
+                with gr.Row():
+                    prompts_prompt_text = gr.Textbox(
+                        label="Prompt (input)",
+                        lines=16,
+                        interactive=False
+                    )
+                    prompts_target_text = gr.Textbox(
+                        label="Target (model output)",
+                        lines=8,
+                        interactive=False
+                    )
+                prompts_raw_info = gr.Textbox(
+                    label="Raw info",
+                    lines=3,
+                    interactive=False,
+                    value=""
+                )
+            
+            # Tab 7: Legacy Visualization
             with gr.Tab("📹 Legacy (HumanML3D)"):
                 gr.Markdown("### Original HumanML3D Visualization")
                 with gr.Row():
@@ -3729,6 +3770,71 @@ def create_interface():
             fn=on_audio_compare,
             inputs=[sample_idx],
             outputs=[audio_gt, audio_decoded, audio_waveform_plot, audio_info]
+        )
+        
+        # Example-Prompts: build InterHuman prompt/target text for current sample and task
+        def on_prompts_generate(idx_val, task_choice, include_audio_val):
+            try:
+                from models.training_utils import build_prompt_interhuman_salsa
+                idx = int(idx_val) if idx_val is not None else 0
+                sample = app._get_sample_from_dataset(idx)
+                interhuman_data = sample.get("interhuman_data")
+                if interhuman_data is None:
+                    return "", "", "No InterHuman data for this sample (cache may lack it)."
+                leader_tokens = interhuman_data.get("leader_tokens")
+                follower_tokens = interhuman_data.get("follower_tokens")
+                relationship_tokens = interhuman_data.get("relationship_tokens")
+                if leader_tokens is None or follower_tokens is None or relationship_tokens is None:
+                    return "", "", "Sample missing leader_tokens, follower_tokens, or relationship_tokens."
+                leader_tokens = np.asarray(leader_tokens).ravel().tolist()
+                follower_tokens = np.asarray(follower_tokens).ravel().tolist()
+                relationship_tokens = np.asarray(relationship_tokens).ravel().tolist()
+                audio_tokens = sample.get("audio_tokens")
+                if audio_tokens is not None:
+                    audio_tokens = np.asarray(audio_tokens).ravel().tolist()
+                task_map = {
+                    "Leader + Rel → Follower": "leader_rel_to_follower",
+                    "Follower + Rel → Leader": "follower_rel_to_leader",
+                    "Caption + Leader + Rel → Follower": "caption_leader_rel_to_follower",
+                    "Caption + Follower + Rel → Leader": "caption_follower_rel_to_leader",
+                    "Pair (Leader+Follower) → Relationship": "pair_to_relationship",
+                    "Caption → Leader": "caption_to_leader",
+                    "Caption → Follower": "caption_to_follower",
+                    "Leader → Follower": "leader_to_follower",
+                    "Follower → Leader": "follower_to_leader",
+                    "Motion completion (Leader)": "motion_completion_leader",
+                    "Motion completion (Follower)": "motion_completion_follower",
+                }
+                task_key = task_map.get(task_choice, "leader_rel_to_follower")
+                metadata = app.get_metadata_info(idx)
+                move_annotations = None
+                level = None
+                if metadata and "error" not in metadata:
+                    move_annotations = metadata.get("moves", [])
+                    level = metadata.get("level")
+                prompt_text, target_text = build_prompt_interhuman_salsa(
+                    leader_tokens=leader_tokens,
+                    follower_tokens=follower_tokens,
+                    relationship_tokens=relationship_tokens,
+                    task=task_key,
+                    move_annotations=move_annotations,
+                    level=level,
+                    audio_tokens=audio_tokens,
+                    include_audio=bool(include_audio_val),
+                )
+                raw_info = f"Sample {idx} | Leader tokens: {len(leader_tokens)}, Rel: {len(relationship_tokens)}, Follower: {len(follower_tokens)}"
+                if include_audio_val and audio_tokens:
+                    raw_info += f" | Audio tokens: {len(audio_tokens)}"
+                return prompt_text, target_text, raw_info
+            except Exception as e:
+                import traceback
+                err = f"Error: {str(e)}\n{traceback.format_exc()}"
+                return "", "", err
+        
+        prompts_btn.click(
+            fn=on_prompts_generate,
+            inputs=[sample_idx, prompts_task, prompts_include_audio],
+            outputs=[prompts_prompt_text, prompts_target_text, prompts_raw_info]
         )
         
         # Metadata visualization
