@@ -175,17 +175,30 @@ python -c "from Salsa_dataloader import SalsaDataset; ds = SalsaDataset(lmdb_pat
 
 ## Training
 
-### Pretraining (None Task)
-Run the general MotionLLM pretraining with:
+We use the same two-stage strategy as [Motion-Agent](https://github.com/szqwu/Motion-Agent): **Stage 1** trains on broad/multi-task data to learn a good motion–text representation; **Stage 2** fine-tunes on a single task (e.g. leader→follower or caption→motion) from the stage-1 checkpoint. See [LLM_PIPELINE_COMPARISON.md](LLM_PIPELINE_COMPARISON.md) for alignment with the base code and hyperparameter notes.
+
+### Training MotionLLM
+
+**Script**: `train_motionllm_salsa.py`
+
+**Stage 1 (multi-task / representation)**  
+Use HumanML3D-style data and Motion-Agent–like hyperparameters (e.g. `--lr 1e-5`, `--epochs 500`, `--train-batch-size 4`):
+
+| Setting | Command |
+|--------|--------|
+| **HumanML3D, no audio** | `python train_motionllm_salsa.py --task caption_to_motion --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_humanml3d` |
+| **HumanML3D, with audio** | `python train_motionllm_salsa.py --task caption_to_motion --include-audio --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_humanml3d_audio` |
+| **InterHuman, no audio** | `python train_motionllm_salsa.py --motion-repr-type interhuman --task caption_to_motion --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_interhuman` |
+| **InterHuman, with audio** | `python train_motionllm_salsa.py --motion-repr-type interhuman --include-audio --task caption_to_motion --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_interhuman_audio` |
+
+**Stage 2 (task-specific)**  
+Resume from a stage-1 (or pretrained) checkpoint and fine-tune on one task:
+
 ```bash
-python Train_motionllm_sals.py   --task none   --data_root ./data/salsa.lmdb   --save_dir ./checkpoints/pretrain
+python train_motionllm_salsa.py --task leader_to_follower --resume-ckpt output_trained/stage1_humanml3d/Xmotionllm_epoch500.pth --lr 1e-5 --epochs 50 --save-dir output_trained/leader_to_follower
 ```
 
-### Fine-tuning
-Resume from the pretraining checkpoint:
-```bash
-python Train_motionllm_sals.py   --task leader_to_follower --pretrained_ckpt ./checkpoints/pretrained_all/salsa_agent.pt --data_root ./data/salsa.lmdb --save_dir ./checkpoints/leader_to_follower
-```
+Optional: `--use-wandb` to log to Weights & Biases.
 
 ---
 

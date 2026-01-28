@@ -42,82 +42,73 @@ class MotionLLM(nn.Module):
                 # trainable_token_indices=[257000] # PEFT version 15 support this but not guaranteed.
             )
 
-        self.load_motionvq()
+        self.load_motionvq()  # HumanML3D VQVAE; used for humanml3d path and baseline caption/generate
+        self.motion_repr_type = getattr(args, 'motion_repr_type', 'humanml3d')  # 'humanml3d' | 'interhuman'
+        self.include_audio = getattr(args, 'include_audio', False)  # if True, add <Audio_0>.. tokens
 
-
+        # -------------------------------------------------------------------------
+        # Baseline: HumanML3D-style tokens only (Motion, </Motion>, <Motion_i>)
+        # -------------------------------------------------------------------------
         if args.is_baseline:
+            self.tokenizer.add_tokens(['<Motion>', '</Motion>'])
+            self.motion_token_indices = len(self.tokenizer) + np.arange(self.args.nb_code)
+            for i in range(self.args.nb_code):
+                self.tokenizer.add_tokens([f'<Motion_{i}>'])
+            self.llm.resize_token_embeddings(len(self.tokenizer))
             self.llm = get_peft_model(self.llm, self.lora_config_t2m, adapter_name='t2m')
             self.llm.add_adapter('m2t', self.lora_config_m2t)
 
-
-        self.tokenizer.add_tokens(['<Motion>', '</Motion>',
-                                    # '<MotionScript>', '</MotionScript>',
-                                    # '<SEP>', '<Motionless>',
-                                    # '<Audio>', '</Audio>',
-                                    ])
-        self.motion_token_indices = np.arange(self.args.nb_code)
-        self.motion_token_indices = len(self.tokenizer) + self.motion_token_indices
-        for i in range(self.args.nb_code):
-            self.tokenizer.add_tokens([f'<Motion_{i}>'])
-        self.llm.resize_token_embeddings(len(self.tokenizer))
-
-
-        if args.is_baseline: # Baseline model architecture
-            self.llm = get_peft_model(self.llm, self.lora_config_t2m, adapter_name='t2m')
-            self.llm.add_adapter('m2t', self.lora_config_m2t)
-        else:
-            NUM_AUDIO_TOKENS = 4096
-            audio_token_range = [f"<Audio_{i}>" for i in range(NUM_AUDIO_TOKENS)]
-            Salsa_special_tokens = [
+        # -------------------------------------------------------------------------
+        # HumanML3D (Salsa): previous implementation — Motion + Salsa modalities
+        # -------------------------------------------------------------------------
+        elif self.motion_repr_type == 'humanml3d':
+            self.tokenizer.add_tokens(['<Motion>', '</Motion>'])
+            self.motion_token_indices = len(self.tokenizer) + np.arange(self.args.nb_code)
+            for i in range(self.args.nb_code):
+                self.tokenizer.add_tokens([f'<Motion_{i}>'])
+            humanml3d_special_tokens = [
                 "<LeaderScript>", "</LeaderScript>",
                 "<FollowerScript>", "</FollowerScript>",
                 "<LeaderMotion>", "</LeaderMotion>",
                 "<FollowerMotion>", "</FollowerMotion>",
-                # "<MotionScript>", "</MotionScript>",
-                # "<Motion>", "</Motion>", Already have that.
-                "<AudioTokens>", "</AudioTokens>",
-            ] + audio_token_range
-            self.tokenizer.add_tokens(Salsa_special_tokens)
+            ]
+            if self.include_audio:
+                humanml3d_special_tokens += ["<AudioTokens>", "</AudioTokens>"] + [f"<Audio_{i}>" for i in range(4096)]
+            self.tokenizer.add_tokens(humanml3d_special_tokens)
             self.llm.resize_token_embeddings(len(self.tokenizer))
-
-            # Define mappings from new tokens to existing tokens
-            # token_mapping = {
-            #     "<LeaderMotion>": "<Motion>",
-            #     "</LeaderMotion>": "</Motion>",
-            #     "<FollowerMotion>": "<Motion>",
-            #     "</FollowerMotion>": "</Motion>",
-            # }
-            # Access the model's embedding layer
-            # embedding_layer = self.llm.get_input_embeddings()
-            # # Initialize new token embeddings
-            # for new_token, existing_token in token_mapping.items():
-            #     new_token_id = self.tokenizer.convert_tokens_to_ids(new_token)
-            #     existing_token_id = self.tokenizer.convert_tokens_to_ids(existing_token)
-            #     with torch.no_grad():
-            #         embedding_layer.weight[new_token_id] = embedding_layer.weight[existing_token_id].clone()
-            # self.required_grad_tokens_ids = []
-            # for i in range(len(Salsa_special_tokens)):
-            #     new_token_id = self.tokenizer.convert_tokens_to_ids(Salsa_special_tokens[i])
-            #     self.required_grad_tokens_ids.append(new_token_id)
-            #     embedding_layer.weight[new_token_id].requires_grad = True
-
             self.llm = get_peft_model(self.llm, self.lora_config_t2m, adapter_name='t2m')
-            # self.llm.add_adapter('m2t', self.lora_config_m2t)
-
             pefti_llm = get_peft_model(self.llm, self.lora_config_t2m, adapter_name='t2m')
             for name, param in pefti_llm.named_parameters():
                 if 'lora' in name:
                     print(name)
-
-
-            # required_Grads:
-            # save the lm_head of the additional tokens
             embeddings = self.llm.get_input_embeddings().weight[self.nb_text_tokens:]
             lm_head = self.llm.lm_head.weight[self.nb_text_tokens:]
 
-            embeddings = pefti_llm.get_input_embeddings().weight[self.nb_text_tokens:]
-            lm_head = pefti_llm.lm_head.weight[self.nb_text_tokens:]
+        # -------------------------------------------------------------------------
+        # InterHuman: use INTERHUMAN_SPECIAL_TOKENS from training_utils + IH/Rel + optional Audio
+        # -------------------------------------------------------------------------
+        elif self.motion_repr_type == 'interhuman':
+            from models.training_utils import INTERHUMAN_SPECIAL_TOKENS
+            interhuman_tokens = list(INTERHUMAN_SPECIAL_TOKENS)
+            nb_ih = getattr(self.args, 'nb_ih_code', 512)
+            nb_rel = getattr(self.args, 'nb_rel_code', 512)
+            interhuman_tokens += [f"<IH_{i}>" for i in range(nb_ih)] + [f"<Rel_{i}>" for i in range(nb_rel)]
+            if self.include_audio:
+                interhuman_tokens += ["<AudioTokens>", "</AudioTokens>"]
+                interhuman_tokens += [f"<Audio_{i}>" for i in range(4096)]
+            self.tokenizer.add_tokens(interhuman_tokens)
+            self.llm.resize_token_embeddings(len(self.tokenizer))
+            self.motion_token_indices = None  # InterHuman uses IH/Rel; no Motion_i range
+            self.llm = get_peft_model(self.llm, self.lora_config_t2m, adapter_name='t2m')
+            pefti_llm = get_peft_model(self.llm, self.lora_config_t2m, adapter_name='t2m')
+            for name, param in pefti_llm.named_parameters():
+                if 'lora' in name:
+                    print(name)
+            embeddings = self.llm.get_input_embeddings().weight[self.nb_text_tokens:]
+            lm_head = self.llm.lm_head.weight[self.nb_text_tokens:]
 
+        else:
+            raise ValueError(f"motion_repr_type must be 'humanml3d' or 'interhuman', got {self.motion_repr_type!r}")
 
         self.llm.to(self.device)
         self.llm.eval()
@@ -148,7 +139,7 @@ class MotionLLM(nn.Module):
         self.net.eval()
         self.net.to(self.device)
     
-    def forward(self, level, ms_desc_L, ms_des_F, vq_tokens_L, vq_tokens_F, audio_tokens):
+    def forward(self, level, ms_desc_L, ms_des_F, vq_tokens_L, vq_tokens_F, audio_tokens, batch_interhuman_data=None):
 
         # inputs_ids, targets, attention_mask = process_batch(tokenizer=self.tokenizer,
         #                                                     batch_of_captions=caption,
@@ -156,15 +147,19 @@ class MotionLLM(nn.Module):
         #                                                     batch_of_motions=motion_tokens,
         #                                                     batch_of_motionscript=ms_desc_bins,
         #                                                     batch_of_audio=audio_tokens)
-        inputs_ids, targets, attention_mask = process_batch_Salsa(tokenizer=self.tokenizer,
-                                                                  batch_aux_info=level,
-                                                                  batch_ms_desc_L=ms_desc_L,
-                                                                  batch_ms_des_F=ms_des_F,
-                                                                  batch_vq_tokens_L=vq_tokens_L,
-                                                                  batch_vq_tokens_F=vq_tokens_F,
-                                                                  batch_audio_tokens=audio_tokens,
-                                                                  max_tgt_len=700,
-                                                                  current_batch_task=self.args.task)
+        inputs_ids, targets, attention_mask = process_batch_Salsa(
+            tokenizer=self.tokenizer,
+            batch_aux_info=level,
+            batch_ms_desc_L=ms_desc_L,
+            batch_ms_des_F=ms_des_F,
+            batch_vq_tokens_L=vq_tokens_L,
+            batch_vq_tokens_F=vq_tokens_F,
+            batch_audio_tokens=audio_tokens,
+            max_tgt_len=700,
+            current_batch_task=None if (getattr(self.args, 'task', None) in (None, 'none', 'all')) else self.args.task,
+            motion_repr_type=self.motion_repr_type,
+            batch_interhuman_data=batch_interhuman_data,
+        )
 
 
 

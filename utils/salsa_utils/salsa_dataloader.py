@@ -128,6 +128,10 @@ class Motion_tokenizer:
         np.save(f"{self.save_dir}/org_motion_{int(time.time())}.npy", motion.squeeze().detach().cpu().numpy())
         print(f"Org Motion saved to {filename}")
 
+# WavTokenizer expects decoder/encoder as top-level; add its root to sys.path before importing
+_wavtok_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "libs", "WavTokenizer"))
+if _wavtok_root not in sys.path:
+    sys.path.insert(0, _wavtok_root)
 
 from utils.salsa_utils.libs.WavTokenizer.encoder.utils import convert_audio
 

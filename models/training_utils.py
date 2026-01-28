@@ -525,37 +525,59 @@ PAIR2LEVEL = {
 def process_batch_Salsa(tokenizer, batch_aux_info, batch_ms_desc_L, batch_ms_des_F,
                                     batch_vq_tokens_L, batch_vq_tokens_F,
                                     batch_audio_tokens,
-                                    max_tgt_len, current_batch_task=None):
+                                    max_tgt_len, current_batch_task=None,
+                                    motion_repr_type='humanml3d',
+                                    batch_interhuman_data=None):
 
     batch_input_ids, batch_target_ids = [], []
+    use_interhuman = (motion_repr_type == 'interhuman') and (batch_interhuman_data is not None)
     if not current_batch_task:
-        current_batch_task = random.choice(all_tasks) # we use this to avoid several random selection
-    for aux, ms_desc_L, ms_des_F, vq_tokens_L, vq_tokens_F, audio_tokens in \
-            zip(batch_aux_info, batch_ms_desc_L, batch_ms_des_F, \
-                               batch_vq_tokens_L, batch_vq_tokens_F, \
-                                    batch_audio_tokens):
+        current_batch_task = random.choice(all_tasks)
 
-        # one_input_ids, one_target_ids = build_one_instance(tokenizer, caption, motion)
-        # one_input_ids, one_target_ids = build_training_instance_salsa(tokenizer=tokenizer,
-        #                                                         caption=caption,
-        #                                                         motion_tokens=motion,
-        #                                                         motion_script_segments=ms_segments)
-        #                                                         # audio)
-        level = aux # PAIR2LEVEL[(aux['vid'][:5]).lower()]
-        one_input_ids, one_target_ids, task = build_random_training_instance_salsa_prompt(
-            tokenizer=tokenizer,
-            leader_motion_script_segments=ms_desc_L.split('-->'),
-            follower_motion_script_segments=ms_des_F.split('-->'),
-            leader_motion_tokens=vq_tokens_L,
-            follower_motion_tokens=vq_tokens_F,
-            audio_tokens=audio_tokens,
-            proficiency_level=level,
-            allowed_tasks=[current_batch_task],
-            snippet_prob=0.5,
-            min_snippet_steps=1,
-            max_snippet_steps=4,
-        )
+    n_samples = len(batch_aux_info) if hasattr(batch_aux_info, '__len__') else 1
+    for i in range(n_samples):
+        aux = batch_aux_info[i] if n_samples > 1 else batch_aux_info
+        ms_desc_L = batch_ms_desc_L[i] if n_samples > 1 else batch_ms_desc_L
+        ms_des_F = batch_ms_des_F[i] if n_samples > 1 else batch_ms_des_F
+        vq_tokens_L = batch_vq_tokens_L[i] if n_samples > 1 else batch_vq_tokens_L
+        vq_tokens_F = batch_vq_tokens_F[i] if n_samples > 1 else batch_vq_tokens_F
+        audio_tokens = batch_audio_tokens[i] if n_samples > 1 else batch_audio_tokens
+        level = aux
 
+        ih_elem = (batch_interhuman_data[i] if n_samples > 1 else (batch_interhuman_data[0] if isinstance(batch_interhuman_data, (list, tuple)) else batch_interhuman_data)) if batch_interhuman_data is not None else None
+        if use_interhuman and ih_elem is not None:
+            ih = ih_elem
+            leader_tokens = torch.as_tensor(ih['leader_tokens']).cpu().ravel().tolist()
+            follower_tokens = torch.as_tensor(ih['follower_tokens']).cpu().ravel().tolist()
+            relationship_tokens = torch.as_tensor(ih['relationship_tokens']).cpu().ravel().tolist()
+            aud_list = torch.as_tensor(audio_tokens).cpu().ravel().tolist() if audio_tokens is not None else None
+            task = random.choice(INTERHUMAN_TASKS)
+            prompt_text, target_text = build_prompt_interhuman_salsa(
+                leader_tokens=leader_tokens,
+                follower_tokens=follower_tokens,
+                relationship_tokens=relationship_tokens,
+                task=task,
+                move_annotations=None,
+                level=level if isinstance(level, str) else None,
+                caption=None,
+                audio_tokens=aud_list,
+                include_audio=random.random() < 0.5,
+            )
+            one_input_ids, one_target_ids = interhuman_prompt_target_to_ids(tokenizer, prompt_text, target_text)
+        else:
+            one_input_ids, one_target_ids, task = build_random_training_instance_salsa_prompt(
+                tokenizer=tokenizer,
+                leader_motion_script_segments=ms_desc_L.split('-->') if isinstance(ms_desc_L, str) else [],
+                follower_motion_script_segments=ms_des_F.split('-->') if isinstance(ms_des_F, str) else [],
+                leader_motion_tokens=vq_tokens_L,
+                follower_motion_tokens=vq_tokens_F,
+                audio_tokens=audio_tokens,
+                proficiency_level=level,
+                allowed_tasks=[current_batch_task],
+                snippet_prob=0.5,
+                min_snippet_steps=1,
+                max_snippet_steps=4,
+            )
 
         batch_input_ids.append(torch.LongTensor(one_input_ids))
         batch_target_ids.append(torch.LongTensor(one_target_ids))
@@ -968,6 +990,15 @@ INTERHUMAN_PROMPT_DELIMITERS = {
     ),
 }
 
+# All special delimiter tokens for InterHuman tokenizer extension (from INTERHUMAN_PROMPT_DELIMITERS).
+# Used in mllm when motion_repr_type=='interhuman'. Audio modality tokens <Audio_0>.. are added separately
+# only when include_audio is True.
+INTERHUMAN_SPECIAL_TOKENS = [
+    "<LeaderMotion>", "</LeaderMotion>",
+    "<FollowerMotion>", "</FollowerMotion>",
+    "<Relationship>", "</Relationship>"
+]
+
 # Canonical list of InterHuman Salsa tasks (for UI, training, and validation).
 # Excludes motionscript-based tasks; all support optional audio via include_audio.
 INTERHUMAN_TASKS = [
@@ -983,6 +1014,27 @@ INTERHUMAN_TASKS = [
     "motion_completion_leader",
     "motion_completion_follower",
 ]
+
+
+def interhuman_prompt_target_to_ids(tokenizer, prompt_text, target_text, prepend_bos=True, append_eos=True):
+    """Convert (prompt_text, target_text) from build_prompt_interhuman_salsa to input_ids/target_ids.
+    Same convention as build_random_training_instance_salsa_prompt: BOS, prompt masked with -100, target + eos with real ids.
+    """
+    input_ids, target_ids = [], []
+    if prepend_bos:
+        input_ids.append(tokenizer.bos_token_id)
+        target_ids.append(-100)
+    prompt_ids = tokenizer(prompt_text, add_special_tokens=False).input_ids
+    input_ids.extend(prompt_ids)
+    target_ids.extend([-100] * len(prompt_ids))
+    target_ids_raw = tokenizer(target_text, add_special_tokens=False).input_ids
+    input_ids.extend(target_ids_raw)
+    target_ids.extend(target_ids_raw)
+    if append_eos:
+        eos_ids = tokenizer("<eos>", add_special_tokens=False).input_ids
+        input_ids.extend(eos_ids)
+        target_ids.extend(eos_ids)
+    return input_ids, target_ids
 
 
 def _format_move_summary_for_prompt(move_annotations, max_chars=200):

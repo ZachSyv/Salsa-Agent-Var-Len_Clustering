@@ -9,6 +9,11 @@ def get_args_parser():
     parser.add_argument('--device', type=str, default='cuda:0', help='device')
     parser.add_argument('--is-baseline', action='store_true', help='whether to use baseline model architecture')
     parser.add_argument('--is-MDM', action='store_true', help='whether to use MDM data format')
+    parser.add_argument('--motion-repr-type', type=str, default='humanml3d', choices=['humanml3d', 'interhuman'],
+                        help='humanml3d: HumanML3D + <Motion_i>; interhuman: InterHuman/Rel + <IH_i>, <Rel_i>')
+    parser.add_argument('--nb-ih-code', type=int, default=512, help='InterHuman codebook size (if motion-repr-type=interhuman)')
+    parser.add_argument('--nb-rel-code', type=int, default=512, help='Relationship codebook size (if motion-repr-type=interhuman)')
+    parser.add_argument('--include-audio', action='store_true', help='Add audio tokens (<Audio_0>..) to tokenizer for training with audio modality')
 
     ## LLM 
     parser.add_argument('--llm-backbone', type=str, default='google/gemma-2-2b-it', help='name of huggingface model backbone')
@@ -64,6 +69,18 @@ def get_args_parser():
     parser.add_argument('--visual-name', type=str, default='baseline', help='output directory')
     parser.add_argument('--exp-name', type=str, default='exp_debug', help='name of the experiment, will create a file inside out-dir')
     
+    ## MotionLLM training (aligned with Motion-Agent where applicable)
+    parser.add_argument('--learning-rate', type=float, dest='llm_lr', default=1e-5, help='learning rate for MotionLLM (Motion-Agent uses 1e-5); train script uses this as lr when running LLM training')
+    parser.add_argument('--epochs', type=int, default=500, help='epochs for stage-1 multi-task training (Motion-Agent uses 500 for t2m)')
+    parser.add_argument('--save-every', type=int, default=10, help='save checkpoint every N epochs')
+    parser.add_argument('--train-batch-size', type=int, default=4, help='batch size for MotionLLM training (Motion-Agent uses 6; 4–6 is typical)')
+    parser.add_argument('--use-wandb', action='store_true', help='log to wandb')
+    parser.add_argument('--wandb-run-name', type=str, default=None, help='wandb run name (default: pretrain_all for task none/all, else <task>_v3)')
+    parser.add_argument('--training-task', '--task', type=str, dest='task', default='none', help='task: none = all tasks (stage 1); or caption_to_motion, leader_to_follower, etc. for stage-2/single-task')
+    parser.add_argument('--resume-ckpt', type=str, default=None, help='path to checkpoint to resume (e.g. stage-1 best or pretrained MotionLLM)')
+    parser.add_argument('--save-dir', type=str, default=None, help='directory to save checkpoints (default: output_trained/<wandb_run_name>)')
+    parser.add_argument('--lmdb-dir', type=str, default='dataset_processed_New/lmdb_Salsa_pair/lmdb_train', help='LMDB train directory (must match cache created by demo.py --create_cache_only)')
+
     ## other
     parser.add_argument('--print-iter', default=200, type=int, help='print frequency')
     parser.add_argument('--eval-iter', default=1000, type=int, help='evaluation frequency')
@@ -75,4 +92,3 @@ def get_args_parser():
     args, unknown = parser.parse_known_args()
     print(f"Unkown arguments detected:\n{unknown}")
     return args
-    return parser.parse_args()

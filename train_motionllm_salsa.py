@@ -41,14 +41,16 @@ def train(model, train_loader, args):
 
             # caption, ms_desc_bins, audio_tokens, motion_tokens = batch
 
-            level, ms_desc_L, ms_des_F, vq_tokens_L, vq_tokens_F, audio_tokens, aux_batch = batch
-            # level = PAIR2LEVEL[(aux_info['vid'][:5]).lower()]
+            if len(batch) == 8:
+                level, ms_desc_L, ms_des_F, vq_tokens_L, vq_tokens_F, audio_tokens, aux_batch, batch_interhuman = batch
+            else:
+                level, ms_desc_L, ms_des_F, vq_tokens_L, vq_tokens_F, audio_tokens, aux_batch = batch
+                batch_interhuman = None
 
-
-            # loss, acc, _, _ = model(caption, ms_desc_bins, audio_tokens, motion_tokens)
             loss, acc, _, _ = model(level,
                                     ms_desc_L, ms_des_F,
-                                    vq_tokens_L, vq_tokens_F, audio_tokens)
+                                    vq_tokens_L, vq_tokens_F, audio_tokens,
+                                    batch_interhuman_data=batch_interhuman)
 
             loss.backward()
             optimizer.step()
@@ -78,39 +80,37 @@ def train(model, train_loader, args):
 def main():
     args = get_args_parser()
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    args.resume_ckpt = 'ckpt/motionllm.pth'
-    args.use_wandb = True
-    # for pretraining
-    args.task = 'caption_to_motion' # 'leader_to_follower' # 'follower_to_leader'
-    args.wandb_project = "Salsa-LLM"
-    args.wandb_run_name = "pretrain_all" if not args.task else args.task + '_v3'
-
-    args.save_dir = f'output_trained/{args.wandb_run_name}'
+    # MotionLLM uses --learning-rate (llm_lr); default 1e-5 to match Motion-Agent
+    args.lr = getattr(args, 'llm_lr', 1e-5)
+    args.wandb_project = getattr(args, 'wandb_project', "Salsa-LLM")
+    # Stage 1: task 'none' or 'all' = all tasks; use pretrain_all unless --wandb-run-name is set
+    _all_tasks = (args.task in (None, 'none', 'all'))
+    args.wandb_run_name = getattr(args, 'wandb_run_name', None) or ("pretrain_all" if _all_tasks else f"{args.task}_v3")
+    args.save_dir = getattr(args, 'save_dir', None) or f'output_trained/{args.wandb_run_name}'
     os.makedirs(args.save_dir, exist_ok=True)
     if args.use_wandb:
         wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=vars(args))
 
-    model = MotionLLM(args)
-    # Loading pretrained model for instruction fine-tuning
+    # Use HumanML3D/MDM cache when motion_repr_type is humanml3d (matches demo.py --create_cache_only)
+    if getattr(args, 'motion_repr_type', 'humanml3d') == 'humanml3d':
+        args.is_MDM = True
+    lmdb_dir = getattr(args, 'lmdb_dir', 'dataset_processed_New/lmdb_Salsa_pair/lmdb_train')
+    # n_poses, subdivision_stride, pose_resampling_fps align with demo.py and README cache creation
+    n_poses, subdivision_stride, pose_resampling_fps = 100, 50, 20
 
-    args.resume_ckpt = 'output_trained\pretrain_all/Xmotionllm_epoch5.pth'
-    if args.resume_ckpt and args.task:
+    model = MotionLLM(args)
+    if args.resume_ckpt and os.path.isfile(args.resume_ckpt):
         model.load_model(args.resume_ckpt)
 
     model.to(args.device)
 
-    # You should implement this dataset to match your caption-motion pair format -- Done!
-
     train_dataset = Salsa_Dataset(args,
-                    lmdb_dir='dataset_processed/lmdb_Salsa_pair/lmdb_train',
-                    n_poses=100,
-                    subdivision_stride=50,
-                    pose_resampling_fps=20)
-    args.batch_size = 4
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
-    args.save_every = 1
-    args.epochs = 100
-    args.lr = 1e-4
+                    lmdb_dir=lmdb_dir,
+                    n_poses=n_poses,
+                    subdivision_stride=subdivision_stride,
+                    pose_resampling_fps=pose_resampling_fps)
+    batch_size = getattr(args, 'train_batch_size', 4)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     train(model, train_loader, args)
 
 
