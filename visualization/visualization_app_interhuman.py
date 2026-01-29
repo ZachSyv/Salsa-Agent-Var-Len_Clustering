@@ -9,16 +9,17 @@ import os
 import sys
 from pathlib import Path
 
-# CRITICAL: Add parent directory to path FIRST, before any other imports
-# This ensures that when salsa_dataloader.py imports models.vqvae, Python can find it
+# CRITICAL: Salsa-Agent root must stay at sys.path[0] so "import models.vqvae" finds Salsa-Agent/models/vqvae.py.
+# motion_representation also has a "models" package (no vqvae.py); if it were first, the import would fail.
 parent_dir = Path(__file__).parent.parent
-if str(parent_dir) not in sys.path:
-    sys.path.insert(0, str(parent_dir))
+parent_dir_str = str(parent_dir)
+if parent_dir_str not in sys.path:
+    sys.path.insert(0, parent_dir_str)
 
-# Also add WavTokenizer path early to avoid import issues
+# Add WavTokenizer and motion_representation after the root so they don't shadow Salsa-Agent/models
 wavtokenizer_base = parent_dir / 'utils' / 'salsa_utils' / 'libs' / 'WavTokenizer'
 if str(wavtokenizer_base) not in sys.path:
-    sys.path.insert(0, str(wavtokenizer_base))
+    sys.path.insert(1, str(wavtokenizer_base))
 
 import gradio as gr
 import numpy as np
@@ -43,9 +44,10 @@ from visualization.visualization_utils import (
 # Import args parser (Salsa_Dataset will be imported lazily to avoid WavTokenizer import issues)
 from options.option_llm import get_args_parser
 
-# Import InterHuman visualization utilities from motion_representation
+# motion_representation must NOT be inserted at 0, or "import models.vqvae" finds motion_representation/models/ (no vqvae.py)
 motion_rep_path = Path(__file__).parent.parent / 'motion_representation'
-sys.path.insert(0, str(motion_rep_path))
+if str(motion_rep_path) not in sys.path:
+    sys.path.insert(1, str(motion_rep_path))  # insert at 1 so Salsa-Agent root stays at 0
 
 try:
     from motion_representation.visualization.vae_visualization_app import VAEVisualizationApp
@@ -415,11 +417,12 @@ class InterHumanVisualizationApp:
             
             # Lazy import Salsa_Dataset to avoid import issues
             # The parent directory should already be in sys.path from the top of the file
-            # But let's ensure it's there and test the import
+            # Ensure Salsa-Agent root is first so "import models.vqvae" finds Salsa-Agent/models, not motion_representation/models
             parent_dir_str = str(self.parent_dir)
-            if parent_dir_str not in sys.path:
-                sys.path.insert(0, parent_dir_str)
-            
+            if parent_dir_str in sys.path:
+                sys.path.remove(parent_dir_str)
+            sys.path.insert(0, parent_dir_str)
+
             # Test if we can import models.vqvae directly (this is what salsa_dataloader.py needs)
             try:
                 import models.vqvae as test_vqvae
@@ -508,7 +511,7 @@ class InterHumanVisualizationApp:
             # Suppress deprecation warning for pyarrow.deserialize (data is serialized with pyarrow)
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=FutureWarning, message=".*pyarrow.deserialize.*")
-                sample = pyarrow.deserialize(sample_bytes)
+            sample = pyarrow.deserialize(sample_bytes)
         
         # Convert tuple to dict
         return self._tuple_to_dict(sample)
