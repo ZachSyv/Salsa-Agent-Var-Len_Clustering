@@ -2,7 +2,9 @@ import os
 import torch
 import wandb
 from tqdm import tqdm
+from transformers import AutoTokenizer
 from models.mllm import MotionLLM
+from models.training_utils import process_batch_Salsa
 from options.option_llm import get_args_parser
 from torch.utils.data import DataLoader
 from utils.salsa_utils.salsa_dataloader import Salsa_Dataset
@@ -16,6 +18,26 @@ PAIR2LEVEL = {
     f"pair{i}": level
     for i, level in zip(range(1, 10), ["beginner", "intermediate", "professional"] * 3)
 }
+
+def collate_fn_salsa(batch):
+    """Custom collate function for Salsa_Dataset that handles variable-length tensors.
+    
+    Returns variable-length tensors (vq_tokens, audio_tokens) as lists, not stacked tensors.
+    process_batch_Salsa will handle padding when building prompts.
+    """
+    # Unpack batch: (level, ms_desc_L, ms_des_F, vq_tokens_L, vq_tokens_F, audio_tokens, aux_info, interhuman_data)
+    levels = [item[0] for item in batch]
+    ms_desc_L_list = [item[1] for item in batch]
+    ms_des_F_list = [item[2] for item in batch]
+    vq_tokens_L_list = [item[3] for item in batch]  # Keep as list (variable length)
+    vq_tokens_F_list = [item[4] for item in batch]  # Keep as list (variable length)
+    audio_tokens_list = [item[5] for item in batch]  # Keep as list (variable length)
+    aux_info_list = [item[6] for item in batch]
+    interhuman_data_list = [item[7] if len(item) > 7 else None for item in batch]
+    
+    # Return as tuple (same format as single sample, but batched)
+    return (levels, ms_desc_L_list, ms_des_F_list, vq_tokens_L_list, vq_tokens_F_list, 
+            audio_tokens_list, aux_info_list, interhuman_data_list)
 
 def train(model, train_loader, args):
     model.train()
@@ -110,10 +132,108 @@ def main():
                     subdivision_stride=subdivision_stride,
                     pose_resampling_fps=pose_resampling_fps)
     batch_size = getattr(args, 'train_batch_size', 4)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, collate_fn=collate_fn_salsa)
     train(model, train_loader, args)
 
 
+def main2():
+    """Minimal test: load dataloader, fetch batch, build prompts via process_batch_Salsa (tokenizer only).
+    No MotionLLM/VQVAE loading — for verifying data flow and prompt correctness without GPU memory."""
+    args = get_args_parser()
+    args.device = torch.device("cpu")
+    if getattr(args, 'motion_repr_type', 'humanml3d') == 'humanml3d':
+        args.is_MDM = True
+    lmdb_dir = getattr(args, 'lmdb_dir', 'dataset_processed_New/lmdb_Salsa_pair/lmdb_train')
+    n_poses, subdivision_stride, pose_resampling_fps = 100, 50, 20
+    batch_size = getattr(args, 'train_batch_size', 4)
+
+    train_dataset = Salsa_Dataset(
+        args, lmdb_dir=lmdb_dir, n_poses=n_poses,
+        subdivision_stride=subdivision_stride, pose_resampling_fps=pose_resampling_fps,
+    )
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, num_workers=0,
+        collate_fn=collate_fn_salsa,
+    )
+
+    batch = next(iter(train_loader))
+    levels, ms_desc_L, ms_des_F, vq_tokens_L, vq_tokens_F, audio_tokens, aux_batch, batch_interhuman = batch
+
+    print("--- Batch shapes ---")
+    print(f"levels: {levels}")
+    print(f"ms_desc_L[0]: {ms_desc_L[0][:200]}..." if len(ms_desc_L[0]) > 200 else f"ms_desc_L[0]: {ms_desc_L[0]}")
+    print(f"ms_des_F[0]: {ms_des_F[0][:200]}..." if len(ms_des_F[0]) > 200 else f"ms_des_F[0]: {ms_des_F[0]}")
+    for i, (vl, vf, aa) in enumerate(zip(vq_tokens_L, vq_tokens_F, audio_tokens)):
+        print(f"  vq_L[{i}].shape={vl.shape}, vq_F[{i}].shape={vf.shape}, audio[{i}].shape={aa.shape}")
+    print(f"aux_batch[0] keys: {list(aux_batch[0].keys()) if isinstance(aux_batch[0], dict) else 'n/a'}")
+    ih0 = batch_interhuman[0] if batch_interhuman else None
+    print(f"batch_interhuman: {type(ih0).__name__ if ih0 is not None else 'None'}")
+
+    tokenizer = AutoTokenizer.from_pretrained(getattr(args, 'llm_backbone', 'google/gemma-2-2b-it'))
+    current_task = None if (getattr(args, 'task', None) in (None, 'none', 'all')) else args.task
+    include_audio = getattr(args, 'include_audio', False)
+
+    # Use InterHuman path when batch has InterHuman data (IH/Rel tokens); else HumanML3D (<Motion_i>)
+    use_ih = any(batch_interhuman[i] is not None for i in range(len(batch_interhuman)))
+    motion_repr = 'interhuman' if use_ih else getattr(args, 'motion_repr_type', 'humanml3d')
+    if use_ih:
+        args.motion_repr_type = 'interhuman'   # ensure we use InterHuman prompts
+    print(f"motion_repr_type: {motion_repr} (batch has InterHuman: {use_ih})")
+
+    input_ids, target_ids, attn_mask = process_batch_Salsa(
+        tokenizer=tokenizer,
+        batch_aux_info=levels,
+        batch_ms_desc_L=ms_desc_L,
+        batch_ms_des_F=ms_des_F,
+        batch_vq_tokens_L=vq_tokens_L,
+        batch_vq_tokens_F=vq_tokens_F,
+        batch_audio_tokens=audio_tokens,
+        max_tgt_len=700,
+        current_batch_task=current_task,
+        motion_repr_type=motion_repr,
+        batch_interhuman_data=batch_interhuman,
+        include_audio=include_audio,
+    )
+
+    # Detokenize (token ids → text) so we can verify what goes into the model in readable form.
+    # Split at prompt/target boundary: target_ids use -100 for prompt, real token ids for target.
+    t0 = target_ids[0]
+    # Find first non-(-100) index = where target starts (not last -100 which could be padding)
+    target_start_idx = (t0 != -100).nonzero(as_tuple=True)[0]
+    prompt_len = target_start_idx[0].item() if len(target_start_idx) > 0 else len(t0)
+    
+    # Debug: check target_ids content
+    n_prompt = (t0 == -100).sum().item()
+    n_target = (t0 != -100).sum().item()
+    print(f"\n[Debug] target_ids[0]: {n_prompt} prompt tokens (-100), {n_target} target tokens (real ids), prompt_len={prompt_len}")
+    
+    input_token_ids = input_ids[0][:prompt_len]
+    target_token_ids = input_ids[0][prompt_len:]
+    input_text = tokenizer.decode(input_token_ids, skip_special_tokens=False)
+    target_text = tokenizer.decode(target_token_ids, skip_special_tokens=False)
+
+    print("\n" + "=" * 60)
+    print("DETOKENIZED FOR VERIFICATION (token ids → readable text)")
+    print("This is what goes into the model for training, in human-readable form.")
+    print("=" * 60)
+    print("\n--- Input (detokenized) ---")
+    print(f"  [token count: {len(input_token_ids)}]")
+    print(input_text[:2500] + ("... [truncated]" if len(input_text) > 2500 else ""))
+    print("\n--- Target (detokenized) ---")
+    print(f"  [token count: {len(target_token_ids)}]")
+    print(target_text[:2500] + ("... [truncated]" if len(target_text) > 2500 else ""))
+
+    # Full sequence: what the model actually receives (prompt + target concatenated)
+    full_sequence_text = tokenizer.decode(input_ids[0], skip_special_tokens=False)
+    print("\n--- Full sequence (what model receives: prompt + target concatenated) ---")
+    print(f"  [total token count: {len(input_ids[0])}]")
+    print(full_sequence_text[:3000] + ("... [truncated]" if len(full_sequence_text) > 3000 else ""))
+
+    print("\n--- Shapes ---")
+    print(f"input_ids {input_ids.shape}, target_ids {target_ids.shape}, attention_mask {attn_mask.shape}")
+    print("main2 done.")
+
+
 if __name__ == '__main__':
-    # os.chdir('S:\Payam\Dance_Salsa_SFU\Motion-Agent-Salsa')  # Windows-specific path, commented for Ubuntu compatibility
     main()
+    # main2()

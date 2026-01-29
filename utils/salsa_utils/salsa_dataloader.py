@@ -1740,13 +1740,12 @@ class Salsa_Dataset(Dataset):
         else:
             interhuman_data_tensors = None
 
-        # we need to return a one str here.
-        # Return format: (existing data..., interhuman_data)
-        # interhuman_data is None for old cache entries, dict for new entries
-        if not self.args.is_MDM:
-            return level, '-->'.join(ms_desc_L), '-->'.join(ms_des_F), vq_tokens_L, vq_tokens_F, audio_tokens, aux_info, interhuman_data_tensors
-        if self.args.is_MDM:
-            return level, HML3D_L, vq_tokens_L, HML3D_F, vq_tokens_F, audio_tokens, aux_info, interhuman_data_tensors
+        # Return format: (level, ms_desc_L, ms_des_F, vq_tokens_L, vq_tokens_F, audio_tokens, aux_info, interhuman_data_tensors)
+        # Always return motion script strings (ms_desc_L, ms_des_F) for prompt building, regardless of is_MDM
+        # HML3D vectors are stored in cache but not needed for LLM training (prompts use motion script + VQ tokens)
+        ms_desc_L_str = '-->'.join(ms_desc_L) if isinstance(ms_desc_L, list) else ms_desc_L
+        ms_des_F_str = '-->'.join(ms_des_F) if isinstance(ms_des_F, list) else ms_des_F
+        return level, ms_desc_L_str, ms_des_F_str, vq_tokens_L, vq_tokens_F, audio_tokens, aux_info, interhuman_data_tensors
     def create_similarity_dataset(self, pickle_file: str, labelstxt_file: str) -> None:
         """TODO"""
         # Todo: 1. Thos function gets the pickle file that I made in the clustering.py(or flowgmm) process as well

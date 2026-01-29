@@ -232,7 +232,7 @@ python -m motion_representation.train \
     --learning_rate 1e-4 \
     --num_epochs 2000 \
     --use_vqvae \
-    --nb_code 512 \
+    --nb_code 1024 \
     --quantizer ema_reset \
     --vq_mu 0.95 \
     --commit_weight 0.02 \
@@ -241,7 +241,7 @@ python -m motion_representation.train \
     --lr_scheduler_gamma 0.05 \
     --representation_type interhuman \
     --use_both_roles \
-    --model_name VQVAE_GRU_InterHuman
+    --model_name VQVAE_GRU_InterHuman_1024
 ```
 
 **Key features:**

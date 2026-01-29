@@ -159,6 +159,7 @@ class MotionLLM(nn.Module):
             current_batch_task=None if (getattr(self.args, 'task', None) in (None, 'none', 'all')) else self.args.task,
             motion_repr_type=self.motion_repr_type,
             batch_interhuman_data=batch_interhuman_data,
+            include_audio=getattr(self.args, 'include_audio', False),
         )
 
 

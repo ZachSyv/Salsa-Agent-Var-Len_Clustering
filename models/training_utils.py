@@ -527,7 +527,8 @@ def process_batch_Salsa(tokenizer, batch_aux_info, batch_ms_desc_L, batch_ms_des
                                     batch_audio_tokens,
                                     max_tgt_len, current_batch_task=None,
                                     motion_repr_type='humanml3d',
-                                    batch_interhuman_data=None):
+                                    batch_interhuman_data=None,
+                                    include_audio=False):
 
     batch_input_ids, batch_target_ids = [], []
     use_interhuman = (motion_repr_type == 'interhuman') and (batch_interhuman_data is not None)
@@ -551,17 +552,36 @@ def process_batch_Salsa(tokenizer, batch_aux_info, batch_ms_desc_L, batch_ms_des
             follower_tokens = torch.as_tensor(ih['follower_tokens']).cpu().ravel().tolist()
             relationship_tokens = torch.as_tensor(ih['relationship_tokens']).cpu().ravel().tolist()
             aud_list = torch.as_tensor(audio_tokens).cpu().ravel().tolist() if audio_tokens is not None else None
-            task = random.choice(INTERHUMAN_TASKS)
+            
+            # Use current_batch_task if it's an InterHuman task, otherwise random choice
+            if current_batch_task and current_batch_task in INTERHUMAN_TASKS:
+                task = current_batch_task
+            else:
+                task = random.choice(INTERHUMAN_TASKS)
+            
+            # Extract move_annotations from aux_info if available
+            move_annotations = None
+            if isinstance(aux, dict) and 'dance_moves' in aux:
+                move_annotations = aux['dance_moves']
+            
+            # Use caption from aux_info if available, otherwise None
+            caption = None
+            if isinstance(aux, dict) and 'caption' in aux:
+                caption = aux['caption']
+            
+            # Use include_audio parameter (from args) instead of random
+            use_audio = include_audio and (aud_list is not None and len(aud_list) > 0)
+            
             prompt_text, target_text = build_prompt_interhuman_salsa(
                 leader_tokens=leader_tokens,
                 follower_tokens=follower_tokens,
                 relationship_tokens=relationship_tokens,
                 task=task,
-                move_annotations=None,
+                move_annotations=move_annotations,
                 level=level if isinstance(level, str) else None,
-                caption=None,
+                caption=caption,
                 audio_tokens=aud_list,
-                include_audio=random.random() < 0.5,
+                include_audio=use_audio,
             )
             one_input_ids, one_target_ids = interhuman_prompt_target_to_ids(tokenizer, prompt_text, target_text)
         else:
