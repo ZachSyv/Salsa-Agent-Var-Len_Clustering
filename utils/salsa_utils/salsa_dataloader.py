@@ -556,6 +556,16 @@ class DataPreprocessor:
                     index 2: A string word.
         """
         if self.pair_dancer == True : return self._sample_from_clip_pair(vid, clip)
+        
+        # Lazy import MS_Salsa only when needed (for cache creation; not needed if cache exists)
+        global MS_Salsa
+        if 'MS_Salsa' not in globals():
+            try:
+                import utils.salsa_utils.libs.MotionScript.captioning_motion_Salsa as MS_Salsa
+            except ImportError:
+                raise ImportError("MS_Salsa (MotionScript) is required for cache creation but not available. "
+                                "Cache should already exist at the expected path. If cache doesn't exist, "
+                                "ensure MotionScript dependencies are installed.")
 
         clip_skeleton3d: np.ndarray = clip['keypoints3d']
         clip_rotmat: np.ndarray = clip['rotmat']
@@ -1629,21 +1639,28 @@ class Salsa_Dataset(Dataset):
         self.args = args
 
         print("Reading data '{}'...".format(lmdb_dir))
+        # Use is_MDM flag explicitly: if True, use _MDM cache; if False, use regular cache
+        is_MDM = getattr(self.args, 'is_MDM', False)
         preloaded_dir = lmdb_dir + cache_suffix
-        if self.args.is_MDM:
+        if is_MDM:
             preloaded_dir += '_MDM'
-        if not os.path.exists(preloaded_dir): # TODO
+        # Use absolute path for cache existence check
+        preloaded_dir_abs = os.path.abspath(preloaded_dir)
+        print(f"Using cache path (is_MDM={is_MDM}): {preloaded_dir_abs}")
+        if not os.path.exists(preloaded_dir_abs): # TODO
             data_sampler = DataPreprocessor(
                 args,
                 lmdb_dir,
-                preloaded_dir,
+                preloaded_dir_abs,
                 n_poses,
                 subdivision_stride,
                 self.skeleton_resampling_fps
             )
             data_sampler.run()
+            preloaded_dir = preloaded_dir_abs  # Use absolute path for opening LMDB
         else:
-            print("Found pre-loaded samples from {}".format(preloaded_dir))
+            print("Found pre-loaded samples from {}".format(preloaded_dir_abs))
+            preloaded_dir = preloaded_dir_abs  # Use absolute path for opening LMDB
 
         # init lmdb
         self.lmdb_env: lmdb.Environment = lmdb.open(
@@ -1660,7 +1677,8 @@ class Salsa_Dataset(Dataset):
         Returns:
             The integer size of samples in the dataset.
         """
-        return self.n_samples-1 # last item is None
+        # Ensure we return at least 0 (handle empty cache gracefully)
+        return max(0, self.n_samples - 1)  # last item is None
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get the item at a specific index in the dataset.
