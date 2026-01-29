@@ -72,7 +72,7 @@ def get_args_parser():
     ## MotionLLM training (aligned with Motion-Agent where applicable)
     parser.add_argument('--learning-rate', type=float, dest='llm_lr', default=1e-5, help='learning rate for MotionLLM (Motion-Agent uses 1e-5); train script uses this as lr when running LLM training')
     parser.add_argument('--epochs', type=int, default=500, help='epochs for stage-1 multi-task training (Motion-Agent uses 500 for t2m)')
-    parser.add_argument('--save-every', type=int, default=10, help='save checkpoint every N epochs')
+    parser.add_argument('--save-every', type=int, default=5, help='save checkpoint every N epochs')
     parser.add_argument('--train-batch-size', type=int, default=4, help='batch size for MotionLLM training (Motion-Agent uses 6; 4–6 is typical)')
     parser.add_argument('--use-wandb', action='store_true', help='log to wandb')
     parser.add_argument('--wandb-run-name', type=str, default=None, help='wandb run name (default: pretrain_all for task none/all, else <task>_v3)')

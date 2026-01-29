@@ -1066,9 +1066,14 @@ class InterHumanVisualizationApp:
         self,
         idx: int,
         use_continuous_concatenation: bool = False,
-        use_actual_relation: bool = False
+        use_actual_relation: bool = False,
+        leader_tokens_override=None,
+        follower_tokens_override=None,
+        relationship_tokens_override=None,
     ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[object], str]:
-        """Visualize motion reconstructed from InterHuman and Relationship tokens."""
+        """Visualize motion reconstructed from InterHuman and Relationship tokens.
+        Optional overrides: pass list/array of tokens to use instead of sample's (e.g. LLM-predicted tokens).
+        """
         if self.dataset is None:
             return None, None, None, None, "Error: No dataset loaded"
         
@@ -1100,15 +1105,20 @@ class InterHumanVisualizationApp:
             root_quat_F = np.array(interhuman_data['root_quat_init_F'], dtype=np.float32)
             root_pos_F = np.array(interhuman_data['root_pos_init_F'], dtype=np.float32)
             
-            # Get tokens - these are now arrays with one token per window
-            leader_tokens = np.array(interhuman_data['leader_tokens'])  # (num_windows,)
-            follower_tokens = np.array(interhuman_data['follower_tokens'])  # (num_windows,)
-            relationship_tokens = np.array(interhuman_data['relationship_tokens'])  # (num_windows,)
+            # Get tokens - use overrides if provided (e.g. LLM-predicted), else sample's tokens
+            leader_tokens = np.array(leader_tokens_override if leader_tokens_override is not None else interhuman_data['leader_tokens']).ravel()
+            follower_tokens = np.array(follower_tokens_override if follower_tokens_override is not None else interhuman_data['follower_tokens']).ravel()
+            relationship_tokens = np.array(relationship_tokens_override if relationship_tokens_override is not None else interhuman_data['relationship_tokens']).ravel()
             num_tokens = len(leader_tokens)
+            # Cap num_windows so we don't index past motion arrays (important when using LLM-predicted token overrides)
+            window_size_after_processing = 19
+            max_windows_from_motion = max(1, len(leader_motion_ih) // window_size_after_processing)
+            num_windows = min(len(leader_tokens), len(follower_tokens), len(relationship_tokens), max_windows_from_motion)
+            leader_tokens = leader_tokens[:num_windows]
+            follower_tokens = follower_tokens[:num_windows]
+            relationship_tokens = relationship_tokens[:num_windows]
             # Continuous concatenation is applied after reconstruction only.
-            num_windows = len(leader_tokens)
-            window_size_after_processing = 19  # salsa_to_interhuman reduces 20 frames to 19
-            
+            # window_size_after_processing already set above (19)
             if DEBUG:
                 print("\n" + "="*80)
                 print("DEBUG: RECONSTRUCTION FROM TOKENS")
@@ -3651,7 +3661,36 @@ def create_interface():
                     value=""
                 )
             
-            # Tab 7: Legacy Visualization
+            # Tab 8: Legacy Visualization
+            # Tab 7: LLM-Inference
+            with gr.Tab("LLM-Inference"):
+                gr.Markdown("### Run LLM inference – compare predicted vs ground truth.")
+                with gr.Row():
+                    llm_task = gr.Dropdown(
+                        label="Task",
+                        choices=[
+                            "Leader + Rel to Follower", "Follower + Rel to Leader",
+                            "Caption + Leader + Rel to Follower", "Caption + Follower + Rel to Leader",
+                            "Pair to Relationship", "Caption to Leader", "Caption to Follower",
+                            "Leader to Follower", "Follower to Leader",
+                            "Motion completion (Leader)", "Motion completion (Follower)",
+                        ],
+                        value="Leader + Rel to Follower"
+                    )
+                    llm_include_audio = gr.Checkbox(label="Include audio", value=False)
+                llm_ckpt = gr.Textbox(label="LLM checkpoint path", value="output_trained/pretrain_all/Xmotionllm_epoch10.pth")
+                llm_run_btn = gr.Button("Run LLM Inference", variant="primary")
+                gr.Markdown("Prompts")
+                with gr.Row():
+                    llm_prompt_text = gr.Textbox(label="Input prompt", lines=12, interactive=False)
+                    llm_gt_target = gr.Textbox(label="Ground truth target", lines=8, interactive=False)
+                    llm_pred_target = gr.Textbox(label="Predicted target", lines=8, interactive=False)
+                gr.Markdown("Side-by-side: Predicted vs Ground truth")
+                with gr.Row():
+                    llm_pred_video = gr.Video(label="Predicted pair", scale=1)
+                    llm_gt_video = gr.Video(label="Ground truth pair", scale=1)
+                llm_info = gr.Textbox(label="Info", lines=8, interactive=False)
+
             with gr.Tab("📹 Legacy (HumanML3D)"):
                 gr.Markdown("### Original HumanML3D Visualization")
                 with gr.Row():
@@ -3835,6 +3874,99 @@ def create_interface():
             fn=on_prompts_generate,
             inputs=[sample_idx, prompts_task, prompts_include_audio],
             outputs=[prompts_prompt_text, prompts_target_text, prompts_raw_info]
+        )
+
+        # LLM-Inference tab handler (tab UI must be added above Legacy tab)
+        def on_llm_inference(idx_val, task_choice, include_audio_val, ckpt_path):
+            try:
+                from models.training_utils import (
+                    build_prompt_interhuman_salsa,
+                    INTERHUMAN_PROMPT_DELIMITERS,
+                    INTERHUMAN_TASK_OUTPUT_TYPE,
+                )
+                from models.mllm import MotionLLM
+                from options.option_llm import get_args_parser
+                idx = int(idx_val) if idx_val is not None else 0
+                sample = app._get_sample_from_dataset(idx)
+                interhuman_data = sample.get("interhuman_data")
+                if interhuman_data is None:
+                    return "", "", "", None, None, "No InterHuman data for this sample."
+                leader_tokens = np.asarray(interhuman_data.get("leader_tokens")).ravel().tolist()
+                follower_tokens = np.asarray(interhuman_data.get("follower_tokens")).ravel().tolist()
+                relationship_tokens = np.asarray(interhuman_data.get("relationship_tokens")).ravel().tolist()
+                audio_tokens = sample.get("audio_tokens")
+                if audio_tokens is not None:
+                    audio_tokens = np.asarray(audio_tokens).ravel().tolist()
+                task_map = {
+                    "Leader + Rel to Follower": "leader_rel_to_follower",
+                    "Follower + Rel to Leader": "follower_rel_to_leader",
+                    "Caption + Leader + Rel to Follower": "caption_leader_rel_to_follower",
+                    "Caption + Follower + Rel to Leader": "caption_follower_rel_to_leader",
+                    "Pair to Relationship": "pair_to_relationship",
+                    "Caption to Leader": "caption_to_leader",
+                    "Caption to Follower": "caption_to_follower",
+                    "Leader to Follower": "leader_to_follower",
+                    "Follower to Leader": "follower_to_leader",
+                    "Motion completion (Leader)": "motion_completion_leader",
+                    "Motion completion (Follower)": "motion_completion_follower",
+                }
+                task_key = task_map.get(task_choice, "leader_rel_to_follower")
+                metadata = app.get_metadata_info(idx)
+                move_annotations = metadata.get("moves", []) if metadata and "error" not in metadata else []
+                level = metadata.get("level") if metadata and "error" not in metadata else None
+                caption = metadata.get("caption") if metadata and "error" not in metadata else None
+                prompt_text, gt_target_text = build_prompt_interhuman_salsa(
+                    leader_tokens=leader_tokens,
+                    follower_tokens=follower_tokens,
+                    relationship_tokens=relationship_tokens,
+                    task=task_key,
+                    move_annotations=move_annotations,
+                    level=level,
+                    caption=caption,
+                    audio_tokens=audio_tokens,
+                    include_audio=bool(include_audio_val),
+                )
+                args = get_args_parser()
+                args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                args.motion_repr_type = "interhuman"
+                args.include_audio = bool(include_audio_val)
+                if not ckpt_path or not os.path.isfile(ckpt_path):
+                    return prompt_text, gt_target_text, "", None, None, f"Checkpoint not found: {ckpt_path}"
+                model = MotionLLM(args)
+                model.load_model(ckpt_path)
+                model.llm.eval()
+                pred_dict = model.generate_Payam_interhuman(prompt_text, task_key, max_new_tokens=150)
+                D = INTERHUMAN_PROMPT_DELIMITERS
+                out_type = INTERHUMAN_TASK_OUTPUT_TYPE.get(task_key, "follower")
+                if out_type == "relationship":
+                    pred_tokens = pred_dict.get("relationship_tokens") or []
+                    pred_target_str = " ".join(D["rel_token"].format(t) for t in pred_tokens) + " " + D["relationship_close"]
+                else:
+                    pred_tokens = pred_dict.get(f"{out_type}_tokens") or []
+                    label = "leader_motion_close" if out_type == "leader" else "follower_motion_close"
+                    pred_target_str = " ".join(D["ih_token"].format(t) for t in pred_tokens) + " " + D[label]
+                leader_override = (pred_dict.get("leader_tokens") or []) if out_type == "leader" else None
+                follower_override = (pred_dict.get("follower_tokens") or []) if out_type == "follower" else None
+                rel_override = (pred_dict.get("relationship_tokens") or []) if out_type == "relationship" else None
+                _, _, pred_combined, _, pred_info = app.visualize_reconstruction_from_tokens(
+                    idx, use_continuous_concatenation=True,
+                    leader_tokens_override=leader_override,
+                    follower_tokens_override=follower_override,
+                    relationship_tokens_override=rel_override,
+                )
+                _, _, gt_combined, _, gt_info = app.visualize_reconstruction_from_tokens(
+                    idx, use_continuous_concatenation=True
+                )
+                info = f"Task: {task_key}\nPredicted {len(pred_tokens)} tokens.\n{pred_info}\n---\n{gt_info}"
+                return prompt_text, gt_target_text, pred_target_str, pred_combined, gt_combined, info
+            except Exception as e:
+                import traceback
+                return "", "", "", None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
+
+        llm_run_btn.click(
+            fn=on_llm_inference,
+            inputs=[sample_idx, llm_task, llm_include_audio, llm_ckpt],
+            outputs=[llm_prompt_text, llm_gt_target, llm_pred_target, llm_pred_video, llm_gt_video, llm_info]
         )
         
         # Metadata visualization

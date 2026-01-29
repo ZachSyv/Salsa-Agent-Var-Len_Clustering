@@ -279,7 +279,43 @@ class MotionLLM(nn.Module):
 
         # print(motion_tokens)
         return tensor_indices # motion_tokens
-    
+
+    def generate_Payam_interhuman(self, full_prompt, task, max_new_tokens=150, num_beams=2, do_sample=False):
+        """Generate InterHuman/Relationship token sequence from prompt (InterHuman representation only).
+        full_prompt: prompt text ending with '### Response:\\n' + label + open delimiter + space (e.g. 'Follower motion: <FollowerMotion> ').
+        task: one of INTERHUMAN_TASKS (e.g. 'leader_rel_to_follower').
+        Returns dict with keys leader_tokens, follower_tokens, relationship_tokens; only the predicted output type is filled (list of ints), others None.
+        """
+        from models.training_utils import INTERHUMAN_TASK_OUTPUT_TYPE, INTERHUMAN_TASKS
+        if self.motion_repr_type != 'interhuman':
+            raise ValueError("generate_Payam_interhuman requires motion_repr_type='interhuman'")
+        out_type = INTERHUMAN_TASK_OUTPUT_TYPE.get(task, "follower")
+        self.llm.set_adapter('t2m')
+        self.llm.eval()
+        input_ids = self.tokenizer.encode(full_prompt, return_tensors="pt").to(self.device)
+        input_len = input_ids.shape[1]
+        with torch.no_grad():
+            outputs = self.llm.generate(
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                num_beams=num_beams,
+                early_stopping=True,
+                return_dict_in_generate=True,
+                pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+            )
+        gen_ids = outputs.sequences[0][input_len:]
+        pred_text = self.tokenizer.decode(gen_ids, skip_special_tokens=False)
+        ih_matches = re.findall(r'<IH_(\d+)>', pred_text)
+        rel_matches = re.findall(r'<Rel_(\d+)>', pred_text)
+        ih_tokens = [int(x) for x in ih_matches]
+        rel_tokens = [int(x) for x in rel_matches]
+        result = {"leader_tokens": None, "follower_tokens": None, "relationship_tokens": None}
+        if out_type == "relationship":
+            result["relationship_tokens"] = rel_tokens
+        elif out_type in ("leader", "follower"):
+            result[f"{out_type}_tokens"] = ih_tokens
+        return result
+
     def caption(self, motion):
         self.llm.set_adapter('m2t')
         self.llm.eval()

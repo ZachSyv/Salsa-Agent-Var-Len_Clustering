@@ -186,10 +186,10 @@ Use HumanML3D-style data and Motion-Agent–like hyperparameters (e.g. `--lr 1e-
 
 | Setting | Command |
 |--------|--------|
-| **HumanML3D, no audio** | `python train_motionllm_salsa.py --task caption_to_motion --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_humanml3d` |
-| **HumanML3D, with audio** | `python train_motionllm_salsa.py --task caption_to_motion --include-audio --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_humanml3d_audio` |
-| **InterHuman, no audio** | `python train_motionllm_salsa.py --motion-repr-type interhuman --task caption_to_motion --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_interhuman` |
-| **InterHuman, with audio** | `python train_motionllm_salsa.py --motion-repr-type interhuman --include-audio --task caption_to_motion --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_interhuman_audio` |
+| **HumanML3D, no audio** | `python train_motionllm_salsa.py --task none --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_humanml3d` |
+| **HumanML3D, with audio** | `python train_motionllm_salsa.py --task none --include-audio --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_humanml3d_audio` |
+| **InterHuman, no audio** | `python train_motionllm_salsa.py --motion-repr-type interhuman --task none --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_interhuman` |
+| **InterHuman, with audio** | `python train_motionllm_salsa.py --motion-repr-type interhuman --include-audio --task none --lr 1e-5 --epochs 500 --train-batch-size 4 --save-dir output_trained/stage1_interhuman_audio` |
 
 **Stage 2 (task-specific)**  
 Resume from a stage-1 (or pretrained) checkpoint and fine-tune on one task:

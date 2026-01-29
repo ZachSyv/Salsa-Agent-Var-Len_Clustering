@@ -534,6 +534,11 @@ def process_batch_Salsa(tokenizer, batch_aux_info, batch_ms_desc_L, batch_ms_des
     use_interhuman = (motion_repr_type == 'interhuman') and (batch_interhuman_data is not None)
     if not current_batch_task:
         current_batch_task = random.choice(all_tasks)
+    # Stage 1 (multi-task): for InterHuman path use one random task per batch so all samples in the batch share the same task
+    if use_interhuman and (not current_batch_task or current_batch_task not in INTERHUMAN_TASKS):
+        batch_interhuman_task = random.choice(INTERHUMAN_TASKS)
+    else:
+        batch_interhuman_task = current_batch_task
 
     n_samples = len(batch_aux_info) if hasattr(batch_aux_info, '__len__') else 1
     for i in range(n_samples):
@@ -553,11 +558,8 @@ def process_batch_Salsa(tokenizer, batch_aux_info, batch_ms_desc_L, batch_ms_des
             relationship_tokens = torch.as_tensor(ih['relationship_tokens']).cpu().ravel().tolist()
             aud_list = torch.as_tensor(audio_tokens).cpu().ravel().tolist() if audio_tokens is not None else None
             
-            # Use current_batch_task if it's an InterHuman task, otherwise random choice
-            if current_batch_task and current_batch_task in INTERHUMAN_TASKS:
-                task = current_batch_task
-            else:
-                task = random.choice(INTERHUMAN_TASKS)
+            # Use same task for entire batch in stage 1 (batch_interhuman_task); or current_batch_task when stage 2
+            task = batch_interhuman_task if (batch_interhuman_task and batch_interhuman_task in INTERHUMAN_TASKS) else random.choice(INTERHUMAN_TASKS)
             
             # Extract move_annotations from aux_info if available
             move_annotations = None
@@ -1034,6 +1036,21 @@ INTERHUMAN_TASKS = [
     "motion_completion_leader",
     "motion_completion_follower",
 ]
+
+# For inference: which output type each task predicts ("leader" | "follower" | "relationship")
+INTERHUMAN_TASK_OUTPUT_TYPE = {
+    "leader_rel_to_follower": "follower",
+    "follower_rel_to_leader": "leader",
+    "caption_leader_rel_to_follower": "follower",
+    "caption_follower_rel_to_leader": "leader",
+    "pair_to_relationship": "relationship",
+    "caption_to_leader": "leader",
+    "caption_to_follower": "follower",
+    "leader_to_follower": "follower",
+    "follower_to_leader": "leader",
+    "motion_completion_leader": "leader",
+    "motion_completion_follower": "follower",
+}
 
 
 def interhuman_prompt_target_to_ids(tokenizer, prompt_text, target_text, prepend_bos=True, append_eos=True):
