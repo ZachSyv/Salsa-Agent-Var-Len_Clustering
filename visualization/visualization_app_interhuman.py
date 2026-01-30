@@ -417,8 +417,12 @@ class InterHumanVisualizationApp:
             
             # Lazy import Salsa_Dataset to avoid import issues
             # The parent directory should already be in sys.path from the top of the file
-            # Ensure Salsa-Agent root is first so "import models.vqvae" finds Salsa-Agent/models, not motion_representation/models
+            # Ensure Salsa-Agent root is first and motion_representation is NOT in path during this import.
+            # motion_representation has its own models/ package (no vqvae.py); if it's in path first, "import models.vqvae" fails.
             parent_dir_str = str(self.parent_dir)
+            motion_rep_str = str(self.parent_dir / 'motion_representation')
+            while motion_rep_str in sys.path:
+                sys.path.remove(motion_rep_str)
             if parent_dir_str in sys.path:
                 sys.path.remove(parent_dir_str)
             sys.path.insert(0, parent_dir_str)
@@ -428,13 +432,19 @@ class InterHumanVisualizationApp:
                 import models.vqvae as test_vqvae
                 del test_vqvae  # Clean up
             except ImportError as test_e:
-                # If we can't import models.vqvae, salsa_dataloader will also fail
+                # Re-add motion_representation so other code still works
+                if motion_rep_str not in sys.path:
+                    sys.path.insert(1, motion_rep_str)
                 return (f"Error: Cannot import models.vqvae. This is required by Salsa_Dataset.\n"
                        f"Error: {str(test_e)}\n"
                        f"Parent dir in sys.path: {parent_dir_str in sys.path}\n"
                        f"Parent dir: {parent_dir_str}\n"
                        f"Current sys.path entries: {sys.path[:5]}\n"
                        f"\nPlease ensure you're running from the Salsa-Agent directory or that the path is set correctly."), 0, 0
+
+            # Re-add motion_representation so Salsa_Dataset and rest of app can import it
+            if motion_rep_str not in sys.path:
+                sys.path.insert(1, motion_rep_str)
             
             # Fix import path for WavTokenizer (already done at top, but ensure it's there)
             wavtokenizer_base = self.parent_dir / 'utils' / 'salsa_utils' / 'libs' / 'WavTokenizer'
@@ -699,10 +709,23 @@ class InterHumanVisualizationApp:
                     if DEBUG:
                         print(f"  Found Relationship stats at: {rel_path}")
         
+        EXPECTED_INTERHUMAN_DIM = 262  # Must match InterHuman representation (salsa_to_interhuman output)
         if interhuman_stats_path and interhuman_stats_path.exists():
             with open(interhuman_stats_path, 'rb') as f:
                 self.interhuman_normalization_stats = pickle.load(f)
-            if DEBUG:
+            if isinstance(self.interhuman_normalization_stats, dict) and 'mean' in self.interhuman_normalization_stats and 'std' in self.interhuman_normalization_stats:
+                mean_arr = np.asarray(self.interhuman_normalization_stats['mean'])
+                std_arr = np.asarray(self.interhuman_normalization_stats['std'])
+                if mean_arr.ndim != 1 or std_arr.ndim != 1 or mean_arr.shape[0] != EXPECTED_INTERHUMAN_DIM or std_arr.shape[0] != EXPECTED_INTERHUMAN_DIM:
+                    print(f"WARNING: InterHuman normalization stats have wrong shape (expected 1D length {EXPECTED_INTERHUMAN_DIM}). "
+                          f"Got mean.shape={mean_arr.shape}, std.shape={std_arr.shape}. Denormalization will be SKIPPED (poses may look wrong).")
+                    self.interhuman_normalization_stats = None
+                else:
+                    # Avoid zero std (would make denorm wrong); match dataset behavior for constant dims
+                    epsilon = 1e-8
+                    std_safe = np.where(std_arr < epsilon, 1.0, std_arr).astype(std_arr.dtype)
+                    self.interhuman_normalization_stats = {**self.interhuman_normalization_stats, 'std': std_safe}
+            if DEBUG and self.interhuman_normalization_stats is not None:
                 print(f"Loaded InterHuman normalization stats from: {interhuman_stats_path}")
                 if isinstance(self.interhuman_normalization_stats, dict):
                     print(f"  Stats keys: {list(self.interhuman_normalization_stats.keys())}")
@@ -718,10 +741,22 @@ class InterHumanVisualizationApp:
             if DEBUG:
                 print(f"WARNING: InterHuman normalization stats not found at: {interhuman_stats_path}")
         
+        EXPECTED_RELATIONSHIP_DIM = 4  # [w, z, x, z] - relationship features
         if relationship_stats_path and relationship_stats_path.exists():
             with open(relationship_stats_path, 'rb') as f:
                 self.relationship_normalization_stats = pickle.load(f)
-            if DEBUG:
+            if isinstance(self.relationship_normalization_stats, dict) and 'mean' in self.relationship_normalization_stats and 'std' in self.relationship_normalization_stats:
+                mean_arr = np.asarray(self.relationship_normalization_stats['mean'])
+                std_arr = np.asarray(self.relationship_normalization_stats['std'])
+                if mean_arr.ndim != 1 or std_arr.ndim != 1 or mean_arr.shape[0] != EXPECTED_RELATIONSHIP_DIM or std_arr.shape[0] != EXPECTED_RELATIONSHIP_DIM:
+                    print(f"WARNING: Relationship normalization stats have wrong shape (expected 1D length {EXPECTED_RELATIONSHIP_DIM}). "
+                          f"Got mean.shape={mean_arr.shape}, std.shape={std_arr.shape}. Denormalization will be SKIPPED.")
+                    self.relationship_normalization_stats = None
+                else:
+                    epsilon = 1e-8
+                    std_safe = np.where(std_arr < epsilon, 1.0, std_arr).astype(std_arr.dtype)
+                    self.relationship_normalization_stats = {**self.relationship_normalization_stats, 'std': std_safe}
+            if DEBUG and self.relationship_normalization_stats is not None:
                 print(f"Loaded Relationship normalization stats from: {relationship_stats_path}")
                 if isinstance(self.relationship_normalization_stats, dict):
                     print(f"  Stats keys: {list(self.relationship_normalization_stats.keys())}")
@@ -1073,9 +1108,11 @@ class InterHumanVisualizationApp:
         leader_tokens_override=None,
         follower_tokens_override=None,
         relationship_tokens_override=None,
+        output_suffix: str = "",
     ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[object], str]:
         """Visualize motion reconstructed from InterHuman and Relationship tokens.
         Optional overrides: pass list/array of tokens to use instead of sample's (e.g. LLM-predicted tokens).
+        output_suffix: appended to temp filenames (e.g. '_pred', '_gt') so multiple calls don't overwrite.
         """
         if self.dataset is None:
             return None, None, None, None, "Error: No dataset loaded"
@@ -1146,12 +1183,18 @@ class InterHumanVisualizationApp:
             if num_windows == 0:
                 return None, None, None, None, f"Error: No tokens found in sample {idx}. Cache may be corrupted or empty."
             
-            # Normalization stats
+            # Normalization stats (must match decoder output dims: InterHuman 262, relationship 4)
+            epsilon = 1e-8
+            expected_ih_dim = getattr(self.interhuman_motion_tokenizer, 'input_dim', 262)
+            expected_rel_dim = getattr(self.relationship_tokenizer, 'input_dim', 4)
             if self.interhuman_normalization_stats is not None:
                 mean_ih = torch.from_numpy(self.interhuman_normalization_stats['mean']).float()
                 std_ih = torch.from_numpy(self.interhuman_normalization_stats['std']).float()
-                epsilon = 1e-8
-                if DEBUG:
+                if mean_ih.shape[0] != expected_ih_dim or std_ih.shape[0] != expected_ih_dim:
+                    print(f"WARNING: InterHuman stats dim ({mean_ih.shape[0]}) != tokenizer input_dim ({expected_ih_dim}). Skipping denorm (poses would be wrong).")
+                    mean_ih = None
+                    std_ih = None
+                if DEBUG and mean_ih is not None:
                     print(f"\nInterHuman Normalization Stats:")
                     print(f"  mean_ih shape: {mean_ih.shape}, sample (first 10): {mean_ih[:10].numpy()}")
                     print(f"  std_ih shape: {std_ih.shape}, sample (first 10): {std_ih[:10].numpy()}")
@@ -1159,14 +1202,17 @@ class InterHumanVisualizationApp:
             else:
                 mean_ih = None
                 std_ih = None
-                epsilon = 1e-8
                 if DEBUG:
                     print("\nWARNING: No InterHuman normalization stats loaded!")
             
             if self.relationship_normalization_stats is not None:
                 mean_rel = torch.from_numpy(self.relationship_normalization_stats['mean']).float()
                 std_rel = torch.from_numpy(self.relationship_normalization_stats['std']).float()
-                if DEBUG:
+                if mean_rel.shape[0] != expected_rel_dim or std_rel.shape[0] != expected_rel_dim:
+                    print(f"WARNING: Relationship stats dim ({mean_rel.shape[0]}) != tokenizer input_dim ({expected_rel_dim}). Skipping denorm.")
+                    mean_rel = None
+                    std_rel = None
+                if DEBUG and mean_rel is not None:
                     print(f"\nRelationship Normalization Stats:")
                     print(f"  mean_rel shape: {mean_rel.shape}, values: {mean_rel.numpy()}")
                     print(f"  std_rel shape: {std_rel.shape}, values: {std_rel.numpy()}")
@@ -1298,17 +1344,25 @@ class InterHumanVisualizationApp:
                     follower_recon_np = follower_recon[:actual_window_len].cpu().numpy()
                     rel_recon_np = rel_recon[:actual_window_len].cpu().numpy()
 
-                    if mean_ih is not None:
+                    # Denormalize only if decoder output dim matches stats (avoids wrong poses from shape mismatch)
+                    use_ih_denorm = mean_ih is not None and leader_recon_np.shape[1] == mean_ih.shape[0]
+                    use_rel_denorm = mean_rel is not None and rel_recon_np.shape[1] == mean_rel.shape[0]
+                    if mean_ih is not None and not use_ih_denorm and w == 0:
+                        print(f"WARNING: Decoder output dim ({leader_recon_np.shape[1]}) != InterHuman stats dim ({mean_ih.shape[0]}). Skipping motion denorm.")
+                    if mean_rel is not None and not use_rel_denorm and w == 0:
+                        print(f"WARNING: Decoder output dim ({rel_recon_np.shape[1]}) != relationship stats dim ({mean_rel.shape[0]}). Skipping relationship denorm.")
+
+                    if use_ih_denorm:
                         leader_recon_denorm_window = leader_recon_np * std_ih.numpy() + mean_ih.numpy()
                         follower_recon_denorm_window = follower_recon_np * std_ih.numpy() + mean_ih.numpy()
                     else:
-                        leader_recon_denorm_window = leader_recon_np
-                        follower_recon_denorm_window = follower_recon_np
+                        leader_recon_denorm_window = leader_recon_np.copy()
+                        follower_recon_denorm_window = follower_recon_np.copy()
 
-                    if mean_rel is not None:
+                    if use_rel_denorm:
                         rel_recon_denorm_window = rel_recon_np * std_rel.numpy() + mean_rel.numpy()
                     else:
-                        rel_recon_denorm_window = rel_recon_np
+                        rel_recon_denorm_window = rel_recon_np.copy()
                     
                     if DEBUG and w > 0:
                         print(f"[DEBUG][REL] Window {w}: rel_recon_denorm_window[0] (pre-override) = {rel_recon_denorm_window[0]}")
@@ -1476,10 +1530,10 @@ class InterHumanVisualizationApp:
             
             vid_id = sample.get('aux_info', {}).get('vid', f'sample_{idx}')
             
-            # Create videos
-            recon_leader_path = os.path.join(self.temp_dir, f"recon_leader_{idx}.mp4")
-            recon_follower_path = os.path.join(self.temp_dir, f"recon_follower_{idx}.mp4")
-            recon_combined_path = os.path.join(self.temp_dir, f"recon_combined_{idx}.mp4")
+            # Create videos (output_suffix avoids overwriting when e.g. LLM-Inference calls pred then GT)
+            recon_leader_path = os.path.join(self.temp_dir, f"recon_leader_{idx}{output_suffix}.mp4")
+            recon_follower_path = os.path.join(self.temp_dir, f"recon_follower_{idx}{output_suffix}.mp4")
+            recon_combined_path = os.path.join(self.temp_dir, f"recon_combined_{idx}{output_suffix}.mp4")
             
             # Visualize reconstructed leader
             # plot_3d_motion_interhuman expects mp_joints: list of (seq_len, 22, 3) keypoint arrays
@@ -1697,10 +1751,10 @@ class InterHumanVisualizationApp:
             
             vid_id = sample.get('aux_info', {}).get('vid', f'sample_{idx}')
             
-            # Create videos
-            recon_leader_path = os.path.join(self.temp_dir, f"recon_leader_{idx}.mp4")
-            recon_follower_path = os.path.join(self.temp_dir, f"recon_follower_{idx}.mp4")
-            recon_combined_path = os.path.join(self.temp_dir, f"recon_combined_{idx}.mp4")
+            # Create videos (output_suffix avoids overwriting when e.g. LLM-Inference calls pred then GT)
+            recon_leader_path = os.path.join(self.temp_dir, f"recon_leader_{idx}{output_suffix}.mp4")
+            recon_follower_path = os.path.join(self.temp_dir, f"recon_follower_{idx}{output_suffix}.mp4")
+            recon_combined_path = os.path.join(self.temp_dir, f"recon_combined_{idx}{output_suffix}.mp4")
             
             # Visualize reconstructed leader
             # plot_3d_motion_interhuman expects mp_joints: list of (seq_len, 22, 3) keypoint arrays
@@ -3951,14 +4005,21 @@ def create_interface():
                 leader_override = (pred_dict.get("leader_tokens") or []) if out_type == "leader" else None
                 follower_override = (pred_dict.get("follower_tokens") or []) if out_type == "follower" else None
                 rel_override = (pred_dict.get("relationship_tokens") or []) if out_type == "relationship" else None
+                # Match Token Reconstruction tab: continuous concatenation + actual relation for correct pair alignment
                 _, _, pred_combined, _, pred_info = app.visualize_reconstruction_from_tokens(
-                    idx, use_continuous_concatenation=True,
+                    idx,
+                    use_continuous_concatenation=True,
+                    use_actual_relation=True,
                     leader_tokens_override=leader_override,
                     follower_tokens_override=follower_override,
                     relationship_tokens_override=rel_override,
+                    output_suffix="_pred",
                 )
                 _, _, gt_combined, _, gt_info = app.visualize_reconstruction_from_tokens(
-                    idx, use_continuous_concatenation=True
+                    idx,
+                    use_continuous_concatenation=True,
+                    use_actual_relation=True,
+                    output_suffix="_gt",
                 )
                 info = f"Task: {task_key}\nPredicted {len(pred_tokens)} tokens.\n{pred_info}\n---\n{gt_info}"
                 return prompt_text, gt_target_text, pred_target_str, pred_combined, gt_combined, info
@@ -4952,4 +5013,4 @@ def create_interface():
 
 if __name__ == "__main__":
     demo = create_interface()
-    demo.launch(share=False, server_name="0.0.0.0", server_port=7862)
+    demo.launch(share=True, server_name="0.0.0.0", server_port=7862)
