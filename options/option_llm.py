@@ -75,6 +75,7 @@ def get_args_parser():
     parser.add_argument('--save-every', type=int, default=5, help='save checkpoint every N epochs')
     parser.add_argument('--train-batch-size', type=int, default=4, help='batch size for MotionLLM training (Motion-Agent uses 6; 4–6 is typical)')
     parser.add_argument('--use-wandb', action='store_true', help='log to wandb')
+    parser.add_argument('--wandb-project', type=str, default='Salsa-LLM', help='wandb project name')
     parser.add_argument('--wandb-run-name', type=str, default=None, help='wandb run name (default: pretrain_all for task none/all, else <task>_v3)')
     parser.add_argument('--training-task', '--task', type=str, dest='task', default='none', help='task: none = all tasks (stage 1); or caption_to_motion, leader_to_follower, etc. for stage-2/single-task')
     parser.add_argument('--resume-ckpt', type=str, default=None, help='path to checkpoint to resume (e.g. stage-1 best or pretrained MotionLLM)')
