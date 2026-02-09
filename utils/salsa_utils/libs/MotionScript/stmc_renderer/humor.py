@@ -62,13 +62,16 @@ def render(vertices, faces, out_path, fps, progress_bar=tqdm, **kwargs):
     video = Video(out_folder, fps=fps)
     video.save(out_path)
 def render_two(vertices1, faces1, vertices2, faces2, out_path, fps, progress_bar=tqdm, **kwargs):
+    # Linux: force EGL for offscreen rendering (avoids "Cannot connect to None" when no display)
+    import sys
+    if sys.platform == "linux":
+        os.environ["PYOPENGL_PLATFORM"] = "egl"
     # Put the vertices at the floor level
     ground = min(vertices1[..., 2].min(), vertices2[..., 2].min())
     # ground = vertices[..., 2].min()
     # vertices[..., 2] -= ground
     vertices1[..., 2] -= ground
     vertices2[..., 2] -= ground
-
 
     import pyrender
 

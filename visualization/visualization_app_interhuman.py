@@ -5,7 +5,10 @@ Shows all stored data including tokens, InterHuman motions, relationship feature
 # DEBUG flag for detailed reconstruction debugging
 DEBUG = True
 
+# Headless Linux: use EGL for pyrender before any imports (pyrender chooses platform at import time)
 import os
+if os.name == "posix" and not os.environ.get("DISPLAY"):
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 import sys
 from pathlib import Path
 
@@ -40,6 +43,7 @@ from visualization.visualization_utils import (
     DEBUG,
     debug_print
 )
+from visualization.joints_to_mesh_utils import keypoints_to_mesh_video
 
 # Import args parser (Salsa_Dataset will be imported lazily to avoid WavTokenizer import issues)
 from options.option_llm import get_args_parser
@@ -889,23 +893,28 @@ class InterHumanVisualizationApp:
             import traceback
             return f"Error loading sample: {str(e)}\n{traceback.format_exc()}"
     
-    def visualize_interhuman_pair(self, idx: int, use_continuous_concatenation: bool = False) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
+    def visualize_interhuman_pair(
+        self,
+        idx: int,
+        use_continuous_concatenation: bool = False,
+        use_mesh: bool = False,
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], str]:
         """
         Visualize InterHuman representation as two-person dancing.
-        Shows: original InterHuman motions, reconstructed from tokens, and combined.
+        Shows: original InterHuman motions and combined. Optionally mesh (SMPL) when use_mesh=True.
         """
         if self.dataset is None:
-            return None, None, None, "Error: No dataset loaded"
+            return None, None, None, None, "Error: No dataset loaded"
         
         if not INTERHUMAN_AVAILABLE:
-            return None, None, None, "Error: InterHuman visualization dependencies not available"
+            return None, None, None, None, "Error: InterHuman visualization dependencies not available"
         
         try:
             sample = self._get_sample_from_dataset(idx)
             interhuman_data = sample.get('interhuman_data')
             
             if interhuman_data is None:
-                return None, None, None, "Error: InterHuman data not available in this sample (old cache format)"
+                return None, None, None, None, "Error: InterHuman data not available in this sample (old cache format)"
             
             # Extract InterHuman motions - these are already stored in cache
             # Following vae_visualization_app.py approach: just visualize stored data
@@ -1026,9 +1035,9 @@ class InterHumanVisualizationApp:
             
             # Final verification
             if leader_keypoints.ndim != 3:
-                return None, None, None, f"Error: Leader keypoints wrong dimensions: {leader_keypoints.ndim}, expected 3"
+                return None, None, None, None, f"Error: Leader keypoints wrong dimensions: {leader_keypoints.ndim}, expected 3"
             if follower_aligned_keypoints.ndim != 3:
-                return None, None, None, f"Error: Follower keypoints wrong dimensions: {follower_aligned_keypoints.ndim}, expected 3"
+                return None, None, None, None, f"Error: Follower keypoints wrong dimensions: {follower_aligned_keypoints.ndim}, expected 3"
             
             vid_id = sample.get('aux_info', {}).get('vid', f'sample_{idx}')
             
@@ -1091,14 +1100,33 @@ class InterHumanVisualizationApp:
             info += f"  Relationship: {relationship_tokens_array.tolist()}\n"
             info += f"\nRelationship Transform (Frame 0):\n"
             info += f"  Angle (half): {np.degrees(angle_half):.2f}°\n"
-            info += f"  Position: x={rel_x:.3f}, z={rel_z_pos:.3f}\n"
             
-            return leader_video_path, follower_video_path, combined_video_path, info
+            mesh_video_path = None
+            if use_mesh:
+                try:
+                    mesh_video_path = os.path.join(self.temp_dir, f"interhuman_mesh_{idx}.mp4")
+                    out = keypoints_to_mesh_video(
+                        leader_keypoints,
+                        follower_aligned_keypoints,
+                        mesh_video_path,
+                        fps=20,
+                    )
+                    if out is None:
+                        mesh_video_path = None
+                        info += "\nMesh: skipped or failed (check priorMDM body_models and pyrender)."
+                    else:
+                        info += "\nMesh: produced (2-person SMPL)."
+                except Exception as mesh_err:
+                    import traceback
+                    mesh_video_path = None
+                    info += f"\nMesh: failed — {mesh_err}\n{traceback.format_exc()}"
+            
+            return leader_video_path, follower_video_path, combined_video_path, mesh_video_path, info
             
         except Exception as e:
             import traceback
             error_msg = f"Error visualizing InterHuman: {str(e)}\n{traceback.format_exc()}"
-            return None, None, None, error_msg
+            return None, None, None, None, error_msg
     
     def visualize_reconstruction_from_tokens(
         self,
@@ -1109,23 +1137,25 @@ class InterHumanVisualizationApp:
         follower_tokens_override=None,
         relationship_tokens_override=None,
         output_suffix: str = "",
-    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[object], str]:
+        use_mesh: bool = False,
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[object], Optional[str], str]:
         """Visualize motion reconstructed from InterHuman and Relationship tokens.
         Optional overrides: pass list/array of tokens to use instead of sample's (e.g. LLM-predicted tokens).
         output_suffix: appended to temp filenames (e.g. '_pred', '_gt') so multiple calls don't overwrite.
+        use_mesh: when True, also render a 2-person SMPL mesh video from reconstructed joints.
         """
         if self.dataset is None:
-            return None, None, None, None, "Error: No dataset loaded"
+            return None, None, None, None, None, "Error: No dataset loaded"
         
         if not INTERHUMAN_AVAILABLE:
-            return None, None, None, None, "Error: InterHuman visualization dependencies not available"
+            return None, None, None, None, None, "Error: InterHuman visualization dependencies not available"
         
         try:
             sample = self._get_sample_from_dataset(idx)
             interhuman_data = sample.get('interhuman_data')
             
             if interhuman_data is None:
-                return None, None, None, None, "Error: InterHuman data not available in this sample (old cache format)"
+                return None, None, None, None, None, "Error: InterHuman data not available in this sample (old cache format)"
             
             if self.interhuman_motion_tokenizer is None:
                 self._load_interhuman_tokenizers()
@@ -1181,7 +1211,7 @@ class InterHumanVisualizationApp:
             
             # Check for empty tokens
             if num_windows == 0:
-                return None, None, None, None, f"Error: No tokens found in sample {idx}. Cache may be corrupted or empty."
+                return None, None, None, None, None, f"Error: No tokens found in sample {idx}. Cache may be corrupted or empty."
             
             # Normalization stats (must match decoder output dims: InterHuman 262, relationship 4)
             epsilon = 1e-8
@@ -1539,7 +1569,7 @@ class InterHumanVisualizationApp:
             # plot_3d_motion_interhuman expects mp_joints: list of (seq_len, 22, 3) keypoint arrays
             leader_recon_keypoints_array = np.asarray(leader_recon_keypoints, dtype=np.float32)
             if leader_recon_keypoints_array.ndim != 3 or leader_recon_keypoints_array.shape[1] != 22 or leader_recon_keypoints_array.shape[2] != 3:
-                return None, None, None, None, f"Error: Reconstructed leader keypoints have wrong shape: {leader_recon_keypoints_array.shape}, expected (seq_len, 22, 3)"
+                return None, None, None, None, None, f"Error: Reconstructed leader keypoints have wrong shape: {leader_recon_keypoints_array.shape}, expected (seq_len, 22, 3)"
             
             plot_3d_motion_interhuman(
                 save_path=recon_leader_path,
@@ -1553,7 +1583,7 @@ class InterHumanVisualizationApp:
             # Visualize reconstructed follower (aligned)
             follower_recon_aligned_keypoints_array = np.asarray(follower_recon_aligned_keypoints, dtype=np.float32)
             if follower_recon_aligned_keypoints_array.ndim != 3 or follower_recon_aligned_keypoints_array.shape[1] != 22 or follower_recon_aligned_keypoints_array.shape[2] != 3:
-                return None, None, None, None, f"Error: Reconstructed follower keypoints have wrong shape: {follower_recon_aligned_keypoints_array.shape}, expected (seq_len, 22, 3)"
+                return None, None, None, None, None, f"Error: Reconstructed follower keypoints have wrong shape: {follower_recon_aligned_keypoints_array.shape}, expected (seq_len, 22, 3)"
             
             plot_3d_motion_interhuman(
                 save_path=recon_follower_path,
@@ -1686,13 +1716,32 @@ class InterHumanVisualizationApp:
             info += f"  Relationship: {rel_error:.6f}\n"
             info += f"\nReconstructed Relationship Transform (Frame 0):\n"
             info += f"  Angle (half): {np.degrees(angle_half_recon):.2f}°\n"
-            info += f"  Position: x={rel_recon_x:.3f}, z={rel_recon_z_pos:.3f}\n"
             
-            return recon_leader_path, recon_follower_path, recon_combined_path, relationship_fig, info
+            recon_mesh_path = None
+            if use_mesh:
+                try:
+                    recon_mesh_path = os.path.join(self.temp_dir, f"recon_mesh_{idx}{output_suffix}.mp4")
+                    out = keypoints_to_mesh_video(
+                        leader_recon_keypoints_array,
+                        follower_recon_aligned_keypoints_array,
+                        recon_mesh_path,
+                        fps=20,
+                    )
+                    if out is None:
+                        recon_mesh_path = None
+                        info += "\nMesh: skipped or failed (check priorMDM body_models and pyrender)."
+                    else:
+                        info += "\nMesh: produced (2-person SMPL)."
+                except Exception as mesh_err:
+                    import traceback
+                    recon_mesh_path = None
+                    info += f"\nMesh: failed — {mesh_err}\n{traceback.format_exc()}"
+            
+            return recon_leader_path, recon_follower_path, recon_combined_path, relationship_fig, recon_mesh_path, info
             
         except Exception as e:
             import traceback
-            return None, None, None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
+            return None, None, None, None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
     
     def visualize_legacy_format(self, idx: int, show_leader: bool, show_follower: bool, show_combined: bool) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
         """Visualize legacy HumanML3D format (for comparison)."""
@@ -3437,10 +3486,16 @@ def create_interface():
                     value=True,
                     info="Transform windows to flow continuously (for multi-window sequences). Unchecked: each window starts from origin (good for debugging)."
                 )
+                use_mesh_interhuman = gr.Checkbox(
+                    label="Also produce mesh visualization (2-person SMPL)",
+                    value=False,
+                    info="Render a 2-person SMPL mesh video from joints. Requires priorMDM body_models and pyrender."
+                )
                 with gr.Row():
                     interhuman_leader_video = gr.Video(label="Leader (InterHuman)", scale=1)
                     interhuman_follower_video = gr.Video(label="Follower (Aligned)", scale=1)
                 interhuman_combined_video = gr.Video(label="Together (Combined)", scale=1)
+                interhuman_mesh_video = gr.Video(label="Mesh (2-person SMPL)", scale=1, visible=True)
                 interhuman_info = gr.Textbox(label="Info", lines=10, interactive=False)
                 interhuman_btn = gr.Button("Visualize InterHuman", variant="primary")
             
@@ -3457,10 +3512,16 @@ def create_interface():
                     value=False,
                     info="Compute relationship input for the next window from the last reconstructed leader/follower frame (world space)."
                 )
+                use_mesh_recon = gr.Checkbox(
+                    label="Also produce mesh visualization (2-person SMPL)",
+                    value=False,
+                    info="Render a 2-person SMPL mesh video from reconstructed joints. Requires priorMDM body_models and pyrender."
+                )
                 with gr.Row():
                     recon_leader_video = gr.Video(label="Leader Reconstructed", scale=1)
                     recon_follower_video = gr.Video(label="Follower Reconstructed", scale=1)
                     recon_combined_video = gr.Video(label="Combined Reconstructed", scale=1)
+                recon_mesh_video = gr.Video(label="Mesh (2-person SMPL)", scale=1, visible=True)
                 relationship_plot = gr.Plot(label="Relationship Features (GT vs Reconstructed)")
                 recon_info = gr.Textbox(label="Reconstruction Info", lines=10, interactive=False)
                 recon_btn = gr.Button("Reconstruct from Tokens", variant="primary")
@@ -3735,6 +3796,11 @@ def create_interface():
                         value="Leader + Rel to Follower"
                     )
                     llm_include_audio = gr.Checkbox(label="Include audio", value=False)
+                use_mesh_llm = gr.Checkbox(
+                    label="Also produce mesh visualization (2-person SMPL)",
+                    value=False,
+                    info="Render 2-person SMPL mesh for predicted and ground truth. Requires priorMDM body_models and pyrender."
+                )
                 llm_ckpt = gr.Textbox(label="LLM checkpoint path", value="output_trained/pretrain_all/Xmotionllm_epoch10.pth")
                 llm_run_btn = gr.Button("Run LLM Inference", variant="primary")
                 gr.Markdown("Prompts")
@@ -3746,6 +3812,9 @@ def create_interface():
                 with gr.Row():
                     llm_pred_video = gr.Video(label="Predicted pair", scale=1)
                     llm_gt_video = gr.Video(label="Ground truth pair", scale=1)
+                with gr.Row():
+                    llm_pred_mesh_video = gr.Video(label="Predicted mesh (2-person SMPL)", scale=1)
+                    llm_gt_mesh_video = gr.Video(label="Ground truth mesh (2-person SMPL)", scale=1)
                 llm_info = gr.Textbox(label="Info", lines=8, interactive=False)
 
             with gr.Tab("📹 Legacy (HumanML3D)"):
@@ -3792,28 +3861,31 @@ def create_interface():
             except Exception as e:
                 return f"Error: {str(e)}"
         
-        def on_interhuman_visualize(idx_val, use_continuous_val):
+        def on_interhuman_visualize(idx_val, use_continuous_val, use_mesh_val):
             try:
                 idx = int(idx_val) if idx_val is not None else 0
-                use_continuous = bool(use_continuous_val) if use_continuous_val is not None else True  # Default to True for correct visualization
-                return app.visualize_interhuman_pair(idx, use_continuous_concatenation=use_continuous)
+                use_continuous = bool(use_continuous_val) if use_continuous_val is not None else True
+                use_mesh = bool(use_mesh_val) if use_mesh_val is not None else False
+                return app.visualize_interhuman_pair(idx, use_continuous_concatenation=use_continuous, use_mesh=use_mesh)
             except Exception as e:
                 import traceback
-                return None, None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
+                return None, None, None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
         
-        def on_reconstruct(idx_val, use_continuous_val, use_actual_relation_val):
+        def on_reconstruct(idx_val, use_continuous_val, use_actual_relation_val, use_mesh_val):
             try:
                 idx = int(idx_val) if idx_val is not None else 0
                 use_continuous = bool(use_continuous_val) if use_continuous_val is not None else False
                 use_actual = bool(use_actual_relation_val) if use_actual_relation_val is not None else False
+                use_mesh = bool(use_mesh_val) if use_mesh_val is not None else False
                 return app.visualize_reconstruction_from_tokens(
                     idx,
                     use_continuous_concatenation=use_continuous,
-                    use_actual_relation=use_actual
+                    use_actual_relation=use_actual,
+                    use_mesh=use_mesh,
                 )
             except Exception as e:
                 import traceback
-                return None, None, None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
+                return None, None, None, None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
         
         # Wire up events
         load_btn.click(
@@ -3842,15 +3914,15 @@ def create_interface():
         # InterHuman visualization
         interhuman_btn.click(
             fn=on_interhuman_visualize,
-            inputs=[sample_idx, use_continuous_interhuman],
-            outputs=[interhuman_leader_video, interhuman_follower_video, interhuman_combined_video, interhuman_info]
+            inputs=[sample_idx, use_continuous_interhuman, use_mesh_interhuman],
+            outputs=[interhuman_leader_video, interhuman_follower_video, interhuman_combined_video, interhuman_mesh_video, interhuman_info]
         )
         
         # Reconstruction
         recon_btn.click(
             fn=on_reconstruct,
-            inputs=[sample_idx, use_continuous_recon, use_actual_relation],
-            outputs=[recon_leader_video, recon_follower_video, recon_combined_video, relationship_plot, recon_info]
+            inputs=[sample_idx, use_continuous_recon, use_actual_relation, use_mesh_recon],
+            outputs=[recon_leader_video, recon_follower_video, recon_combined_video, relationship_plot, recon_mesh_video, recon_info]
         )
         
         # Audio comparison
@@ -3934,7 +4006,7 @@ def create_interface():
         )
 
         # LLM-Inference tab handler (tab UI must be added above Legacy tab)
-        def on_llm_inference(idx_val, task_choice, include_audio_val, ckpt_path):
+        def on_llm_inference(idx_val, task_choice, include_audio_val, use_mesh_val, ckpt_path):
             try:
                 from models.training_utils import (
                     build_prompt_interhuman_salsa,
@@ -3944,10 +4016,11 @@ def create_interface():
                 from models.mllm import MotionLLM
                 from options.option_llm import get_args_parser
                 idx = int(idx_val) if idx_val is not None else 0
+                use_mesh = bool(use_mesh_val) if use_mesh_val is not None else False
                 sample = app._get_sample_from_dataset(idx)
                 interhuman_data = sample.get("interhuman_data")
                 if interhuman_data is None:
-                    return "", "", "", None, None, "No InterHuman data for this sample."
+                    return "", "", "", None, None, None, None, "No InterHuman data for this sample."
                 leader_tokens = np.asarray(interhuman_data.get("leader_tokens")).ravel().tolist()
                 follower_tokens = np.asarray(interhuman_data.get("follower_tokens")).ravel().tolist()
                 relationship_tokens = np.asarray(interhuman_data.get("relationship_tokens")).ravel().tolist()
@@ -3988,7 +4061,7 @@ def create_interface():
                 args.motion_repr_type = "interhuman"
                 args.include_audio = bool(include_audio_val)
                 if not ckpt_path or not os.path.isfile(ckpt_path):
-                    return prompt_text, gt_target_text, "", None, None, f"Checkpoint not found: {ckpt_path}"
+                    return prompt_text, gt_target_text, "", None, None, None, None, f"Checkpoint not found: {ckpt_path}"
                 model = MotionLLM(args)
                 model.load_model(ckpt_path)
                 model.llm.eval()
@@ -4006,7 +4079,7 @@ def create_interface():
                 follower_override = (pred_dict.get("follower_tokens") or []) if out_type == "follower" else None
                 rel_override = (pred_dict.get("relationship_tokens") or []) if out_type == "relationship" else None
                 # Match Token Reconstruction tab: continuous concatenation + actual relation for correct pair alignment
-                _, _, pred_combined, _, pred_info = app.visualize_reconstruction_from_tokens(
+                _, _, pred_combined, _, pred_mesh_path, pred_info = app.visualize_reconstruction_from_tokens(
                     idx,
                     use_continuous_concatenation=True,
                     use_actual_relation=True,
@@ -4014,23 +4087,25 @@ def create_interface():
                     follower_tokens_override=follower_override,
                     relationship_tokens_override=rel_override,
                     output_suffix="_pred",
+                    use_mesh=use_mesh,
                 )
-                _, _, gt_combined, _, gt_info = app.visualize_reconstruction_from_tokens(
+                _, _, gt_combined, _, gt_mesh_path, gt_info = app.visualize_reconstruction_from_tokens(
                     idx,
                     use_continuous_concatenation=True,
                     use_actual_relation=True,
                     output_suffix="_gt",
+                    use_mesh=use_mesh,
                 )
                 info = f"Task: {task_key}\nPredicted {len(pred_tokens)} tokens.\n{pred_info}\n---\n{gt_info}"
-                return prompt_text, gt_target_text, pred_target_str, pred_combined, gt_combined, info
+                return prompt_text, gt_target_text, pred_target_str, pred_combined, gt_combined, pred_mesh_path, gt_mesh_path, info
             except Exception as e:
                 import traceback
-                return "", "", "", None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
+                return "", "", "", None, None, None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
 
         llm_run_btn.click(
             fn=on_llm_inference,
-            inputs=[sample_idx, llm_task, llm_include_audio, llm_ckpt],
-            outputs=[llm_prompt_text, llm_gt_target, llm_pred_target, llm_pred_video, llm_gt_video, llm_info]
+            inputs=[sample_idx, llm_task, llm_include_audio, use_mesh_llm, llm_ckpt],
+            outputs=[llm_prompt_text, llm_gt_target, llm_pred_target, llm_pred_video, llm_gt_video, llm_pred_mesh_video, llm_gt_mesh_video, llm_info]
         )
         
         # Metadata visualization
@@ -4139,7 +4214,7 @@ def create_interface():
                     combined_video_path = os.path.join(app.temp_dir, f"interhuman_combined_{idx}.mp4")
                     if not os.path.exists(combined_video_path):
                         # Generate it if it doesn't exist
-                        leader_vid, follower_vid, combined_vid, _ = app.visualize_interhuman_pair(idx, use_continuous_concatenation=False)
+                        leader_vid, follower_vid, combined_vid, _, _ = app.visualize_interhuman_pair(idx, use_continuous_concatenation=False)
                         if combined_vid and os.path.exists(combined_vid):
                             combined_video_path = combined_vid
                     
@@ -4952,7 +5027,7 @@ def create_interface():
             try:
                 idx = int(idx_val) if idx_val is not None else 0
                 # Use same visualization as ground truth (InterHuman tab) with continuous concatenation
-                leader_vid, follower_vid, combined_vid, info = app.visualize_interhuman_pair(idx, use_continuous_concatenation=True)
+                leader_vid, follower_vid, combined_vid, _, info = app.visualize_interhuman_pair(idx, use_continuous_concatenation=True)
                 return combined_vid, info
             except Exception as e:
                 import traceback

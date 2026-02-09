@@ -404,6 +404,45 @@ except ImportError as e:
     )
 
 
+def rotate_keypoints_deg_x(keypoints3d, rotation_deg):
+    """
+    Rotate 3D keypoints by rotation_deg degrees around X-axis.
+    Uses the same rotX/transf logic as salsa_utils.py and salsa_to_interhuman for consistency.
+    +90° reverses the -90° preprocessing rotation (front view for mesh rendering).
+
+    Args:
+        keypoints3d: (T, N, 3) or (T, 3*N) numpy array
+        rotation_deg: float - degrees (e.g. 90 for front view)
+
+    Returns:
+        Rotated keypoints, same shape as input, float64.
+    """
+    if rotation_deg == 0:
+        return np.asarray(keypoints3d, dtype=np.float64)
+    import math
+    orig_shape = np.array(keypoints3d).shape
+    kp = np.asarray(keypoints3d, dtype=np.float64)
+    if kp.ndim == 2:
+        kp = kp.reshape(kp.shape[0], -1, 3)
+    T = kp.shape[0]
+    rotX = lambda theta: torch.tensor(
+        [[1, 0, 0], [0, torch.cos(theta), -torch.sin(theta)], [0, torch.sin(theta), torch.cos(theta)]],
+        dtype=torch.float64,
+    )
+
+    def transf(rotMat, theta_deg, values):
+        theta_rad = math.pi * torch.tensor(theta_deg, dtype=torch.float64) / 180.0
+        return rotMat(theta_rad).mm(values.t()).t()
+
+    kp_t = torch.from_numpy(kp)
+    for frame_i in range(T):
+        kp_t[frame_i] = transf(rotX, rotation_deg, kp_t[frame_i])
+    out = kp_t.numpy()
+    if len(orig_shape) == 2:
+        out = out.reshape(orig_shape)
+    return out
+
+
 def salsa_to_interhuman(keypoints3d, rotmat, n_joints=22, rotation_deg=0):
     """
     Convert Salsa keypoints3d and rotmat to InterHuman representation.
