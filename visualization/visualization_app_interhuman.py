@@ -5,10 +5,7 @@ Shows all stored data including tokens, InterHuman motions, relationship feature
 # DEBUG flag for detailed reconstruction debugging
 DEBUG = True
 
-# Headless Linux: use EGL for pyrender before any imports (pyrender chooses platform at import time)
 import os
-if os.name == "posix" and not os.environ.get("DISPLAY"):
-    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 import sys
 from pathlib import Path
 
@@ -535,9 +532,17 @@ class InterHumanVisualizationApp:
         interhuman_data = None
         sample_len = len(sample) if hasattr(sample, '__len__') else 0
         
+        ms_motioncodes_L = None
+        ms_motioncodes_F = None
         if not self.is_MDM:
-            if sample_len == 12:
-                # New format with InterHuman
+            if sample_len == 14:
+                # Format with InterHuman + MotionScript timeline motioncodes
+                poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
+                 poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
+                 audio_tokens, audio_raw, aux_info, interhuman_data, \
+                 ms_motioncodes_L, ms_motioncodes_F = sample
+            elif sample_len == 12:
+                # New format with InterHuman (no motioncodes)
                 poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
                  poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
                  audio_tokens, audio_raw, aux_info, interhuman_data = sample
@@ -547,7 +552,7 @@ class InterHumanVisualizationApp:
                  poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
                  audio_tokens, audio_raw, aux_info = sample
             else:
-                raise ValueError(f"Unexpected sample length: {sample_len} (expected 11 or 12 for non-MDM)")
+                raise ValueError(f"Unexpected sample length: {sample_len} (expected 11, 12 or 14 for non-MDM)")
             HML3D_L = None
             HML3D_F = None
         else:
@@ -579,8 +584,221 @@ class InterHumanVisualizationApp:
             'HML3D_L': HML3D_L,
             'HML3D_F': HML3D_F,
             'interhuman_data': interhuman_data,
+            'ms_motioncodes_L': ms_motioncodes_L,
+            'ms_motioncodes_F': ms_motioncodes_F,
         }
-    
+
+    def _generate_motionscript_timeline_gifs(self, idx: int, show_timeline: bool):
+        """Generate MotionScript timeline GIFs for leader and follower using MotionScript's create_gif_with_blinking.
+        Returns (leader_gif_path, follower_gif_path, status_message).
+        """
+        def _err(msg):
+            return None, None, msg
+        if not show_timeline:
+            return None, None, "Checkbox is off; enable it to generate timeline."
+        try:
+            sample = self._get_sample_from_dataset(idx)
+        except Exception as e:
+            import traceback
+            return None, None, f"Failed to load sample: {e}\n{traceback.format_exc()}"
+        ms_L = sample.get('ms_motioncodes_L')
+        ms_F = sample.get('ms_motioncodes_F')
+        poses_L = sample.get('poses_keypoints3d_L')
+        total_frames = int(poses_L.shape[0]) if poses_L is not None and hasattr(poses_L, 'shape') else 0
+        if total_frames <= 0:
+            return _err("No pose frames in sample (total_frames <= 0).")
+        if (ms_L is None or len(ms_L) == 0) and (ms_F is None or len(ms_F) == 0):
+            return _err(
+                "No MotionScript motion codes for this sample. "
+                "Use a cache built with is_MDM=False and rebuild the cache to include motion codes."
+            )
+        try:
+            from utils.salsa_utils.libs.MotionScript.MS_Algorithms import create_gif_with_blinking, merge_gifs_vertical
+        except ImportError as e:
+            return _err(f"Could not import MotionScript timeline: {e}")
+        import copy
+        path_L = None
+        path_F = None
+        errors = []
+        poses_F = sample.get('poses_keypoints3d_F')
+
+        def _render_and_merge(keypoints, timeline_gif_path, merged_path, role_label):
+            """Render skeleton to mp4, then merge vertically (animation on top, timeline below)."""
+            if keypoints is None or not hasattr(keypoints, 'shape') or keypoints.size == 0:
+                return None
+            anim_mp4 = os.path.join(self.temp_dir, f"motionscript_anim_{role_label}_{idx}.mp4")
+            try:
+                render_skeleton_from_keypoints(
+                    np.asarray(keypoints, dtype=np.float32),
+                    anim_mp4,
+                    title=f"{role_label} (MotionScript)",
+                    fps=20,
+                    radius=4,
+                    figsize=(6, 6),
+                    dpi=100,
+                )
+            except Exception as e:
+                import traceback
+                errors.append(f"{role_label} animation: {e}\n{traceback.format_exc()}")
+                return timeline_gif_path
+            if not os.path.exists(anim_mp4):
+                return timeline_gif_path
+            try:
+                merge_gifs_vertical(anim_mp4, timeline_gif_path, merged_path)
+                return merged_path if os.path.exists(merged_path) else timeline_gif_path
+            except Exception as e:
+                import traceback
+                errors.append(f"{role_label} merge: {e}\n{traceback.format_exc()}")
+                return timeline_gif_path
+
+        if ms_L is not None and len(ms_L) > 0:
+            try:
+                motioncodes_L = copy.deepcopy(ms_L)
+                out_L = os.path.join(self.temp_dir, f"motionscript_timeline_leader_{idx}.gif")
+                create_gif_with_blinking(motioncodes_L, total_frames=total_frames, outname=out_L)
+                if os.path.exists(out_L):
+                    merged_L = os.path.join(self.temp_dir, f"motionscript_merged_leader_{idx}.gif")
+                    path_L = _render_and_merge(poses_L, out_L, merged_L, "Leader")
+            except Exception as e:
+                import traceback
+                errors.append(f"Leader: {e}\n{traceback.format_exc()}")
+        if ms_F is not None and len(ms_F) > 0:
+            try:
+                motioncodes_F = copy.deepcopy(ms_F)
+                out_F = os.path.join(self.temp_dir, f"motionscript_timeline_follower_{idx}.gif")
+                create_gif_with_blinking(motioncodes_F, total_frames=total_frames, outname=out_F)
+                if os.path.exists(out_F):
+                    merged_F = os.path.join(self.temp_dir, f"motionscript_merged_follower_{idx}.gif")
+                    path_F = _render_and_merge(poses_F, out_F, merged_F, "Follower")
+            except Exception as e:
+                import traceback
+                errors.append(f"Follower: {e}\n{traceback.format_exc()}")
+        status = "Generated leader (animation + timeline)." if path_L else "Leader: no output."
+        status += " Generated follower (animation + timeline)." if path_F else " Follower: no output."
+        if errors:
+            status += "\n\nErrors:\n" + "\n---\n".join(errors)
+        return path_L, path_F, status
+
+    def _run_motionscript_stat_analysis(self, max_samples: int = 50) -> str:
+        """Run MotionScript motioncode statistical analysis on the loaded dataset (leader motions).
+        Returns text summary and saves PDFs to temp dir; reads back statistics.txt for display.
+        """
+        if self.dataset is None:
+            return "Error: No dataset loaded. Load an LMDB first."
+        if self.is_MDM:
+            return "Error: MotionScript motioncode stats require a non-MDM cache (Is MDM Format unchecked)."
+        try:
+            import utils.salsa_utils.libs.MotionScript.captioning_motion_Salsa as MS_Salsa
+            from utils.salsa_utils.libs.MotionScript import captioning as captioning_py
+        except ImportError as e:
+            return f"Error: MotionScript not available: {e}"
+        from scipy.spatial.transform import Rotation as R
+        from collections import defaultdict
+
+        n_total = len(self.dataset)
+        n_run = min(int(max_samples), n_total) if max_samples else n_total
+        all_motion_stats = defaultdict(list)
+        errors = []
+        skipped = 0
+        for idx in range(n_run):
+            try:
+                sample = self._get_sample_from_dataset(idx)
+            except Exception as e:
+                errors.append(f"Sample {idx}: {e}")
+                skipped += 1
+                continue
+            poses_kp = sample.get("poses_keypoints3d_L")
+            poses_rotmat = sample.get("poses_rotmat_L")
+            if poses_kp is None or poses_rotmat is None or not hasattr(poses_kp, "shape") or poses_kp.size == 0:
+                skipped += 1
+                if idx == 0:
+                    errors.append(f"Sample 0: missing or empty poses_keypoints3d_L/poses_rotmat_L (keys present: {list(sample.keys())})")
+                continue
+            poses_kp = np.asarray(poses_kp, dtype=np.float64).copy()
+            poses_rotmat = np.asarray(poses_rotmat, dtype=np.float64).copy()
+            T = poses_rotmat.shape[0]
+            # Cache stores rotmat as (T, 498): [trans(3) | 55*9 flattened rotmats]; or (T, J, 3, 3)
+            if poses_rotmat.ndim == 2 and poses_rotmat.shape[1] == 498:
+                trans = poses_rotmat[:, :3].copy()
+                flat_rot = poses_rotmat[:, 3:].copy()  # (T, 495) -> (T, 55, 3, 3)
+                rotmat_4d = flat_rot.reshape(T, 55, 3, 3)
+                J_use = 22
+                rotmat_4d = rotmat_4d[:, :J_use]
+            elif poses_rotmat.ndim == 4 and poses_rotmat.shape[2:4] == (3, 3):
+                J_use = poses_rotmat.shape[1]
+                rotmat_4d = poses_rotmat
+                trans = poses_kp[:, 0, :].copy()
+            else:
+                if idx == 0:
+                    errors.append(f"Sample 0: rotmat shape {poses_rotmat.shape} not (T,498) or (T,J,3,3)")
+                skipped += 1
+                continue
+            rotvec = np.zeros((T, J_use * 3), dtype=np.float64)
+            for t in range(T):
+                for j in range(J_use):
+                    # .copy() so scipy gets a writable buffer (cache arrays can be read-only)
+                    rotvec[t, j * 3 : (j + 1) * 3] = R.from_matrix(np.asarray(rotmat_4d[t, j], dtype=np.float64).copy()).as_rotvec()
+            input_loaded = {
+                "poses": rotvec,
+                "3d_keypoints": poses_kp,
+                "trans": trans,
+                "body_betas": None,
+                "body_vertices": None,
+                "body_faces": None,
+            }
+            try:
+                m_interpretations = MS_Salsa.MotionScript_Forward_Salsa(
+                    input_loaded, motion_id=f"stat_{idx}", motion_stats=True
+                )
+            except Exception as e:
+                errors.append(f"Sample {idx} MotionScript: {e}")
+                skipped += 1
+                continue
+            if not isinstance(m_interpretations, dict):
+                skipped += 1
+                if idx == 0:
+                    ty = type(m_interpretations).__name__
+                    err_details = repr(m_interpretations)[:200] if m_interpretations is not None else "None"
+                    errors.append(f"Sample 0: MotionScript returned {ty} (expected dict): {err_details}")
+                continue
+            # Aggregate by joint-set index: step2 expects m_interpretations[k][j] = list of interpretations for joint set j
+            for k in m_interpretations:
+                for j, joint_set_list in enumerate(m_interpretations[k]):
+                    while len(all_motion_stats[k]) <= j:
+                        all_motion_stats[k].append([])
+                    all_motion_stats[k][j].extend(joint_set_list)
+
+        if not all_motion_stats:
+            err_msg = (
+                f"No motioncode stats collected (skipped {skipped}/{n_run} samples). "
+                "Possible causes: (1) samples missing or empty poses_keypoints3d_L/poses_rotmat_L, "
+                "(2) rotmat shape not (T,498) or (T,J,3,3), (3) MotionScript returned no stats (e.g. very short sequences)."
+            )
+            if errors:
+                err_msg += "\n\nErrors / first-sample info:\n" + "\n".join(errors[:10])
+            return err_msg
+
+        stat_dir = os.path.join(self.temp_dir, "motionscript_statistics")
+        os.makedirs(stat_dir, exist_ok=True)
+        try:
+            captioning_py.motioncode_stat_analysis_step2_visualization(dict(all_motion_stats), stat_dir)
+        except Exception as e:
+            import traceback
+            return f"Error in step2 visualization: {e}\n{traceback.format_exc()}"
+        stats_file = os.path.join(stat_dir, "statistics.txt")
+        if os.path.isfile(stats_file):
+            with open(stats_file, "r") as f:
+                text = f.read()
+        else:
+            text = "statistics.txt not written."
+        pdfs = [f for f in os.listdir(stat_dir) if f.endswith(".pdf")]
+        if pdfs:
+            text += f"\n\nPlots saved in: {stat_dir}\nFiles: " + ", ".join(sorted(pdfs))
+        text = f"Analyzed {n_run} samples (of {n_total}).\n\n{text}"
+        if errors:
+            text += "\n\nSample errors (first 5):\n" + "\n".join(errors[:5])
+        return text
+
     def _load_interhuman_tokenizers(self):
         """Lazy load InterHuman and Relationship VQVAE tokenizers."""
         if self.interhuman_motion_tokenizer is not None:
@@ -2324,7 +2542,7 @@ class InterHumanVisualizationApp:
                 matched_annotations['styling_leader'] = aux_info.get('styling_leader', [])
                 matched_annotations['styling_follower'] = aux_info.get('styling_follower', [])
             
-            return {
+            out = {
                 'vid': vid,
                 'pair': vid_metadata.get('pair', 'Unknown'),
                 'song': vid_metadata.get('song', 'Unknown'),
@@ -2342,6 +2560,10 @@ class InterHumanVisualizationApp:
                 'styling_follower': matched_annotations['styling_follower'],
                 'annotations_loaded': 'dance_moves' in aux_info
             }
+            if sample.get('ms_desc_L') is not None or sample.get('ms_des_F') is not None:
+                out['motionscript_leader'] = sample.get('ms_desc_L') or ''
+                out['motionscript_follower'] = sample.get('ms_des_F') or ''
+            return out
         except Exception as e:
             import traceback
             return {'error': f"Error loading metadata: {str(e)}\n{traceback.format_exc()}"}
@@ -3498,6 +3720,17 @@ def create_interface():
                 interhuman_mesh_video = gr.Video(label="Mesh (2-person SMPL)", scale=1, visible=True)
                 interhuman_info = gr.Textbox(label="Info", lines=10, interactive=False)
                 interhuman_btn = gr.Button("Visualize InterHuman", variant="primary")
+                gr.Markdown("### MotionScript: Motion Codes on Timeline")
+                show_motionscript_timeline = gr.Checkbox(
+                    label="Show MotionScript timeline (motion codes on timeline)",
+                    value=False,
+                    info="Generate timeline GIFs with motion codes for leader and follower (requires non-MDM cache with MotionScript)."
+                )
+                with gr.Row():
+                    motionscript_timeline_leader = gr.Video(label="Leader MotionScript Timeline", scale=1)
+                    motionscript_timeline_follower = gr.Video(label="Follower MotionScript Timeline", scale=1)
+                motionscript_timeline_info = gr.Textbox(label="MotionScript Timeline status / errors", lines=4, interactive=False)
+                motionscript_timeline_btn = gr.Button("Generate MotionScript Timeline", variant="secondary")
             
             # Tab 3: Token Reconstruction
             with gr.Tab("🔄 Token Reconstruction"):
@@ -3681,6 +3914,28 @@ def create_interface():
                                 interactive=False
                             )
                         stats_btn = gr.Button("Compute Statistics", variant="primary")
+                        gr.Markdown("### MotionScript motioncode statistics")
+                        gr.Markdown(
+                            "Run MotionScript statistical analysis on the loaded dataset (leader motions). "
+                            "Shows distribution of motioncode types and threshold/classification stats (helps check if thresholds are appropriate). "
+                            "Uses up to the specified number of samples; requires non-MDM cache."
+                        )
+                        with gr.Row():
+                            motionscript_stat_max_samples = gr.Number(
+                                label="Max samples to analyze",
+                                value=50,
+                                minimum=1,
+                                maximum=500,
+                                step=1,
+                                interactive=True
+                            )
+                            motionscript_stat_btn = gr.Button("Run MotionScript motioncode analysis", variant="secondary")
+                        motionscript_stat_output = gr.Textbox(
+                            label="MotionScript statistics result",
+                            lines=25,
+                            interactive=False,
+                            value="Click the button to run analysis..."
+                        )
                     
                     # Sub-tab 3: Search & Filter
                     with gr.Tab("🔍 Search & Filter"):
@@ -3916,6 +4171,23 @@ def create_interface():
             fn=on_interhuman_visualize,
             inputs=[sample_idx, use_continuous_interhuman, use_mesh_interhuman],
             outputs=[interhuman_leader_video, interhuman_follower_video, interhuman_combined_video, interhuman_mesh_video, interhuman_info]
+        )
+
+        # MotionScript timeline (motion codes on timeline)
+        def on_motionscript_timeline(idx_val, show_timeline_val):
+            try:
+                idx = int(idx_val) if idx_val is not None else 0
+                return app._generate_motionscript_timeline_gifs(idx, bool(show_timeline_val))
+            except Exception as e:
+                import traceback
+                err = f"MotionScript timeline error: {e}\n{traceback.format_exc()}"
+                debug_print(err)
+                return None, None, err
+
+        motionscript_timeline_btn.click(
+            fn=on_motionscript_timeline,
+            inputs=[sample_idx, show_motionscript_timeline],
+            outputs=[motionscript_timeline_leader, motionscript_timeline_follower, motionscript_timeline_info]
         )
         
         # Reconstruction
@@ -4203,6 +4475,13 @@ def create_interface():
                 detailed_info += f"Errors: {len(metadata.get('errors', []))}\n"
                 detailed_info += f"Styling (Leader): {len(metadata.get('styling_leader', []))}\n"
                 detailed_info += f"Styling (Follower): {len(metadata.get('styling_follower', []))}\n"
+                if 'motionscript_leader' in metadata or 'motionscript_follower' in metadata:
+                    def _fmt_ms(x):
+                        if x is None: return '(none)'
+                        if isinstance(x, list): return ' --> '.join(str(e) for e in x) if x else '(empty)'
+                        return str(x)
+                    detailed_info += f"\nMotionScript (Leader):\n{_fmt_ms(metadata.get('motionscript_leader'))}\n"
+                    detailed_info += f"\nMotionScript (Follower):\n{_fmt_ms(metadata.get('motionscript_follower'))}\n"
                 
                 # Create timeline visualization
                 timeline_plot = app.create_timeline_visualization(metadata)
@@ -4722,6 +5001,20 @@ def create_interface():
                 stats_radar_chart,
             ]
         )
+
+        def on_motionscript_stat_analysis(max_samples_val):
+            try:
+                n = int(max_samples_val) if max_samples_val is not None else 50
+                return app._run_motionscript_stat_analysis(max_samples=n)
+            except Exception as e:
+                import traceback
+                return f"Error: {e}\n{traceback.format_exc()}"
+
+        motionscript_stat_btn.click(
+            fn=on_motionscript_stat_analysis,
+            inputs=[motionscript_stat_max_samples],
+            outputs=[motionscript_stat_output]
+        )
         
         # Handler for class selection dropdown
         def on_class_selected(class_choice):
@@ -5088,4 +5381,4 @@ def create_interface():
 
 if __name__ == "__main__":
     demo = create_interface()
-    demo.launch(share=True, server_name="0.0.0.0", server_port=7862)
+    demo.launch(share=False, server_name="0.0.0.0", server_port=7862)

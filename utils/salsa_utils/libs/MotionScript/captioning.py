@@ -4545,9 +4545,9 @@ def motioncode_stat_analysis_step2_visualization(m_interpretations_all, save_dir
         kinds_total[m_kind] = kind_total
     total = sum(kinds_total[m_kind] for m_kind in kinds_total)
     for m_kind in kinds_total:
+        pct = (100.0 * kinds_total[m_kind] / total) if total > 0 else 0.0
         stats_text += (
-            # f"Ration {m_kind} ---> {kinds_total[m_kind]} / {total}    ||    {(kinds_total[m_kind] / total) * 100:.3}%\n")
-            f"{m_kind:<{20}} ---> {kinds_total[m_kind]:>5} / {total:<5}    ||    {(kinds_total[m_kind] / total) * 100:>6.2f}%\n")
+            f"{m_kind:<{20}} ---> {kinds_total[m_kind]:>5} / {total:<5}    ||    {pct:>6.2f}%\n")
 
     with open(os.path.join(save_dir, "statistics.txt"), 'w') as fopen:
         fopen.write(stats_text)
@@ -4563,19 +4563,25 @@ def motioncode_stat_analysis_step2_visualization(m_interpretations_all, save_dir
     m_queries = prepare_motioncode_queries()
 
 
-    # Get stats for elementary posecodes
+    # Get stats for elementary posecodes (only for kinds present and with non-zero total to avoid KeyError/ZeroDivisionError)
+    scatter_kinds = [
+        ("angular", "angular_stats.pdf"),
+        ("proximity", "proximity_stats.pdf"),
+        ("spatial_relation_x", "spatial_X_stats.pdf"),
+        ("spatial_relation_y", "spatial_Y_stats.pdf"),
+        ("spatial_relation_z", "spatial_Z_stats.pdf"),
+        ("displacement_x", "disp_X_stats.pdf"),
+        ("displacement_y", "disp_Y_stats.pdf"),
+        ("displacement_z", "disp_Z_stats.pdf"),
+        ("rotation_pitch", "rotation_pitch_stats.pdf"),
+        ("rotation_roll", "rotation_roll_stats.pdf"),
+        ("rotation_yaw", "rotation_yaw_stats.pdf"),
+    ]
     params = [m_interpretations_all, m_queries, None, None, "", prop_eligible, prop_unskippable]
-    motioncode_intptt_scatter("angular", *params, save_fig="angular_stats.pdf", save_dir=save_dir)
-    motioncode_intptt_scatter("proximity", *params, save_fig="proximity_stats.pdf", save_dir=save_dir)
-    motioncode_intptt_scatter("spatial_relation_x", *params, save_fig="spatial_X_stats.pdf", save_dir=save_dir)
-    motioncode_intptt_scatter("spatial_relation_y", *params, save_fig="spatial_Y_stats.pdf", save_dir=save_dir)
-    motioncode_intptt_scatter("spatial_relation_z", *params, save_fig="spatial_Z_stats.pdf", save_dir=save_dir)
-    motioncode_intptt_scatter("displacement_x", *params, save_fig="disp_X_stats.pdf", save_dir=save_dir)
-    motioncode_intptt_scatter("displacement_y", *params,  save_fig="disp_Y_stats.pdf", save_dir=save_dir)
-    motioncode_intptt_scatter("displacement_z", *params, save_fig="disp_Z_stats.pdf", save_dir=save_dir)
-    motioncode_intptt_scatter("rotation_pitch", *params, save_fig="rotation_pitch_stats.pdf", save_dir=save_dir)
-    motioncode_intptt_scatter("rotation_roll", *params, save_fig="rotation_roll_stats.pdf", save_dir=save_dir)
-    motioncode_intptt_scatter("rotation_yaw", *params, save_fig="rotation_yaw_stats.pdf", save_dir=save_dir)
+    for m_kind, save_fig in scatter_kinds:
+        if m_kind not in m_interpretations_all or kinds_total.get(m_kind, 0) == 0:
+            continue
+        motioncode_intptt_scatter(m_kind, *params, save_fig=save_fig, save_dir=save_dir)
 
     # ADD_POSECODE_KIND
 

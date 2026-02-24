@@ -42,8 +42,8 @@ from utils.salsa_utils.libs.MotionScript.stmc_renderer.humor import HumorRendere
 
 # setup body model
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-# body_model = BodyModel(bm_path=config.SMPLH_NEUTRAL_BM, num_betas=config.n_betas)
-body_model = BodyModel(bm_fname=config.SMPLH_NEUTRAL_BM, num_betas=config.n_betas, model_type='smplh')
+# BodyModel: use positional path for compatibility with both bm_path and bm_fname API variants
+body_model = BodyModel(config.SMPLH_NEUTRAL_BM, num_betas=config.n_betas, model_type='smplh')
 body_model.eval()
 body_model.to(device)
 
@@ -570,7 +570,7 @@ import importlib
 def MotionScript_Forward_Salsa(input_loaded, motion_id, motion_stats=False, ablations=[]):
     print("Reloading felan")
     # importlib.reload(utils)
-    return actual_MotionScript_Forward_Salsa(input_loaded, motion_id, motion_stats=False, ablations=[])
+    return actual_MotionScript_Forward_Salsa(input_loaded, motion_id, motion_stats=motion_stats, ablations=ablations)
 def actual_MotionScript_Forward_Salsa(input_loaded, motion_id, motion_stats=False, ablations=[]):
     import argparse
     # from config import POSESCRIPT_LOCATION
@@ -620,15 +620,12 @@ def actual_MotionScript_Forward_Salsa(input_loaded, motion_id, motion_stats=Fals
                                     input_loaded)
 
     fps = 20.0
-    # if len(pose_seq_data) < 40:
-    #     return '', '', 0.0, 0.0
     SEQ_LENGTH = min(int(AUGMENTATION_LENGTH*fps), len(pose_seq_data))
     if len(pose_seq_data) < fps/2:
-        return '', '', '', 0, 0
+        return {} if motion_stats else ('', [], [], 0, 0, [])
     start_frame = random.randint(0, len(pose_seq_data)-SEQ_LENGTH)  # since both included
     end_frame = start_frame + SEQ_LENGTH
-    # start_frame, end_frame = int(2.4*20),  int(4.3*20 ) # len(pose_seq_data) # int(6.5*20 )# len(pose_seq_data) X#1
-    start_frame, end_frame = 0, len(pose_seq_data)  # 40 # len(pose_seq_data) # For hamid
+    start_frame, end_frame = 0, len(pose_seq_data)  # For hamid
 
     start_time, end_time = float(start_frame) / fps, float(end_frame) / fps
     # XRZ
@@ -871,17 +868,11 @@ def actual_MotionScript_Forward_Salsa(input_loaded, motion_id, motion_stats=Fals
                                'faces': input_loaded['body_faces']}
                 visualize_frames_SFU_SALSA(pose_seq_data, trans, motioncodes4vis, motion_id, motion_path, poses_rotvec, body_params)
 
-        # if ' '.join(motion_description).strip() == '':
-        #     binning_detial, motion_descriptions_non_agg, motion_description = '', [''], ['']
-        # else:
-        #     # motion_descriptions_non_agg = [motion_babel_text.strip()] + motion_descriptions_non_agg
-        #     # motion_description = [motion_babel_text.strip()] + motion_description
         return ((binning_detial + str(2*"\n") + str(10*" ") + " BABEL Captions:\n\n *W.R.T. HumanML3D frames from AMASS\n" + motion_babel_details),
-                # " ".join([x for x in motion_descriptions_non_agg if x!='']),
                 motion_descriptions_non_agg,
-                # " ".join([x for x in motion_description if x!='']),
                 motion_description,
-                start_time, end_time)
+                start_time, end_time,
+                motioncodes4vis)
 
     if args.action == 'motioncode_stats':
         # captioning_py.motioncode_stat_analysis(coords, save_dir)

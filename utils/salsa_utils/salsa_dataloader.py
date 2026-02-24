@@ -1,7 +1,6 @@
 """create data samples
 """
 import os
-
 import sys
 
 import math
@@ -323,7 +322,8 @@ class DataPreprocessor:
             for clip_idx, clip in enumerate(clips):
                 self._sample_from_clip(vid, clip)
                 counter = counter + 1
-            # if counter > 2: break
+                # break  # TODO: remove - quick test: only first clip per video
+            # break  # TODO: remove - quick test: only first video
 
         # print number of samples
         with self.dst_lmdb_env.begin() as txn:
@@ -1224,6 +1224,7 @@ class DataPreprocessor:
         sample_HML3D_vec_list_L = []
         sample_vqtokens_list_L = []
         sample_ms_description_list_L = []
+        sample_ms_motioncodes_list_L = []
 
         # Follower's sample list
         sample_skeleton3d_list_F = []
@@ -1231,6 +1232,7 @@ class DataPreprocessor:
         sample_HML3D_vec_list_F = []
         sample_vqtokens_list_F = []
         sample_ms_description_list_F = []
+        sample_ms_motioncodes_list_F = []
 
         # InterHuman sample list
         sample_interhuman_data_list = []  # List of dicts with InterHuman data and tokens
@@ -1329,6 +1331,16 @@ class DataPreprocessor:
             # )
 
             if not self.args.is_MDM:
+                # Lazy import MS_Salsa (MotionScript) when needed for pair cache creation
+                global MS_Salsa
+                if 'MS_Salsa' not in globals():
+                    try:
+                        import utils.salsa_utils.libs.MotionScript.captioning_motion_Salsa as MS_Salsa
+                    except ImportError:
+                        raise ImportError(
+                            "MS_Salsa (MotionScript) is required for cache creation with is_MDM=False. "
+                            "Ensure MotionScript dependencies are installed, or use existing cache."
+                        )
                 # S, T = 80, 140
                 S, T = 0, -1
                 ablation = ['chronological']
@@ -1344,11 +1356,12 @@ class DataPreprocessor:
                                     }
 
 
-                bining_details_printout, ms_non_agg_L, ms_agg_L, s, e  = \
+                bining_details_printout, ms_non_agg_L, ms_agg_L, s, e, motioncodes4vis_L = \
                     MS_Salsa.MotionScript_Forward_Salsa(input2MotionScript,
                                                     motion_id=f'Win_{i}',
                                                     ablations=ablation)
-                sample_bin_ms_L = ms_agg_L # We pick the simples plain textual rep (non-aggregated).
+                sample_bin_ms_L = ms_agg_L  # We pick the simplest plain textual rep (non-aggregated).
+                sample_bin_motioncodes_L = motioncodes4vis_L if isinstance(motioncodes4vis_L, list) else []
 
                 # Follower's
                 input2MotionScript = {
@@ -1359,12 +1372,13 @@ class DataPreprocessor:
                     'body_vertices': None,  # sample_body_vertices[S:T],
                     'body_faces': None  # sample_body_faces
                 }
-                bining_details_printout, ms_non_agg_F, ms_agg_F, s, e = \
+                bining_details_printout, ms_non_agg_F, ms_agg_F, s, e, motioncodes4vis_F = \
                     MS_Salsa.MotionScript_Forward_Salsa(input2MotionScript,
                                                         motion_id=f'Win_{i}',
                                                         ablations=ablation)
 
                 sample_bin_ms_F = ms_agg_F
+                sample_bin_motioncodes_F = motioncodes4vis_F if isinstance(motioncodes4vis_F, list) else []
                 # We pick the simples plain
                 # textual rep (non-aggregated through time by setting max_range to zerp).
 
@@ -1374,6 +1388,8 @@ class DataPreprocessor:
             else:
                 sample_bin_ms_L = []
                 sample_bin_ms_F = []
+                sample_bin_motioncodes_L = []
+                sample_bin_motioncodes_F = []
 
             subdivision_start_time = start_idx / self.skeleton_resampling_fps
             subdivision_end_time = fin_idx / self.skeleton_resampling_fps
@@ -1427,6 +1443,7 @@ class DataPreprocessor:
                 sample_HML3D_vec_list_L.append(sample_HML3D_joints_vec_L)
             sample_vqtokens_list_L.append(sample_vqtokens_L)
             sample_ms_description_list_L.append(sample_bin_ms_L)
+            sample_ms_motioncodes_list_L.append(sample_bin_motioncodes_L)
 
             # Follower's
             sample_skeleton3d_list_F.append(sample_skeletons3d_F)
@@ -1435,6 +1452,7 @@ class DataPreprocessor:
                 sample_HML3D_vec_list_F.append(sample_HML3D_joints_vec_F)
             sample_vqtokens_list_F.append(sample_vqtokens_F)
             sample_ms_description_list_F.append(sample_bin_ms_F)
+            sample_ms_motioncodes_list_F.append(sample_bin_motioncodes_F)
 
             sample_audio_tokens_list.append(sample_audiotokens)
             sample_audio_raw_list.append(sample_audio_raw)
@@ -1456,13 +1474,15 @@ class DataPreprocessor:
                         poses_rotmat_L, poses_rotmat_F, \
                         ms_description_L, ms_description_F, \
                         poses_vq_tokens_L, poses_vq_tokens_F, \
-                         audio_tokens, audio_raw, aux, interhuman_data in \
+                         audio_tokens, audio_raw, aux, interhuman_data, \
+                        ms_motioncodes_L, ms_motioncodes_F in \
                             zip(sample_skeleton3d_list_L, sample_skeleton3d_list_F,
                                 sample_rotmat_list_L, sample_rotmat_list_F,
                                 sample_ms_description_list_L, sample_ms_description_list_F,
                                 sample_vqtokens_list_L, sample_vqtokens_list_F,
                                 sample_audio_tokens_list, sample_audio_raw_list, aux_info,
-                                sample_interhuman_data_list):
+                                sample_interhuman_data_list,
+                                sample_ms_motioncodes_list_L, sample_ms_motioncodes_list_F):
 
                         poses_keypoints3d_L = np.asarray(poses_keypoints3d_L)
                         poses_rotmat_L = np.asarray(poses_rotmat_L)
@@ -1481,13 +1501,13 @@ class DataPreprocessor:
                         if interhuman_data is not None:
                             v = [poses_keypoints3d_L, poses_rotmat_L, ms_description_L, poses_vqtokens_L,
                                  poses_keypoints3d_F, poses_rotmat_F, ms_description_F, poses_vqtokens_F,
-                                 audio_tokens, audio_raw, aux, interhuman_data]
+                                 audio_tokens, audio_raw, aux, interhuman_data,
+                                 ms_motioncodes_L, ms_motioncodes_F]
                         else:
-                            # Fallback: no InterHuman data (shouldn't happen, but handle gracefully)
                             v = [poses_keypoints3d_L, poses_rotmat_L, ms_description_L, poses_vqtokens_L,
                                  poses_keypoints3d_F, poses_rotmat_F, ms_description_F, poses_vqtokens_F,
-                                 audio_tokens, audio_raw, aux, None]
-                        # v = [words, poses, audio_raws, audio_mels, aux, sentence_leve_latents, GPT_3_Embedding]
+                                 audio_tokens, audio_raw, aux, None,
+                                 ms_motioncodes_L, ms_motioncodes_F]
                         v = pyarrow.serialize(v).to_buffer()
                         txn.put(k, v)
                         self.n_out_samples += 1
@@ -1705,16 +1725,24 @@ class Salsa_Dataset(Dataset):
             # Handle both old cache format (without InterHuman) and new format (with InterHuman)
             interhuman_data = None
             if not self.args.is_MDM:
-                if len(sample) == 12:
-                    # New format with InterHuman data
+                if len(sample) == 14:
+                    # Format with InterHuman + MotionScript timeline motioncodes
+                    poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
+                     poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
+                     audio_tokens, audio_raw, aux_info, interhuman_data, \
+                     ms_motioncodes_L, ms_motioncodes_F = sample
+                elif len(sample) == 12:
+                    # Format with InterHuman data (no motioncodes)
                     poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
                      poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
                      audio_tokens, audio_raw, aux_info, interhuman_data = sample
+                    ms_motioncodes_L, ms_motioncodes_F = None, None
                 else:
                     # Old format without InterHuman data
                     poses_keypoints3d_L, poses_rotmat_L, ms_desc_L, vq_tokens_L, \
                      poses_keypoints3d_F, poses_rotmat_F, ms_des_F, vq_tokens_F, \
                      audio_tokens, audio_raw, aux_info = sample
+                    ms_motioncodes_L, ms_motioncodes_F = None, None
             if self.args.is_MDM:
                 if len(sample) == 14:
                     # New format with InterHuman data

@@ -1780,7 +1780,7 @@ def create_timeline_image_with_blinking(motioncodes, frame_number, total_frames)
     # Load a font
     try:
         font = ImageFont.truetype("arial.ttf", 50)  # Font size adjusted
-    except IOError:
+    except (IOError, OSError):
         font = ImageFont.load_default()  # Fallback to default font if arial.ttf is not available
 
     # Define colors for the segments
@@ -1792,17 +1792,28 @@ def create_timeline_image_with_blinking(motioncodes, frame_number, total_frames)
     # Organize motion codes by joint
     joint_segments = {}
     for segment in motioncodes:
-
-
-        # Adjust the joint names
-        segment['joint1'] = ' '.join(word.strip().capitalize() for word in segment['joint1'].strip("[]").
-                                     replace("'", "").split(',')).replace('None', '')
-        segment['joint2'] = ' '.join(word.strip().capitalize() for word in segment['joint2'].strip("[]").
-                                     replace("'", "").split(',')).replace('None', '')
-        joint = segment['joint1']
+        j1 = segment.get('joint1')
+        j2 = segment.get('joint2')
+        if j1 is None:
+            j1 = ''
+        if j2 is None:
+            j2 = ''
+        if not isinstance(j1, str):
+            j1 = str(j1)
+        if not isinstance(j2, str):
+            j2 = str(j2)
+        segment['joint1'] = ' '.join(word.strip().capitalize() for word in j1.strip("[]").replace("'", "").split(',')).replace('None', '')
+        segment['joint2'] = ' '.join(word.strip().capitalize() for word in j2.strip("[]").replace("'", "").split(',')).replace('None', '')
+        joint = segment['joint1'] or 'Unknown'
         if joint not in joint_segments:
             joint_segments[joint] = []
         joint_segments[joint].append(segment)
+
+    if not joint_segments:
+        img = Image.new('RGB', (width, 400), color=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        draw.text((10, 10), "No motion code segments to display.", fill="black", font=font)
+        return img
 
     # Calculate maximum width of joint names
     max_joint_name_width = max(
@@ -1867,7 +1878,10 @@ def create_timeline_image_with_blinking(motioncodes, frame_number, total_frames)
     draw = ImageDraw.Draw(img)
     # ------------
 
-    font_title = ImageFont.truetype("arial.ttf", 70)
+    try:
+        font_title = ImageFont.truetype("arial.ttf", 70)
+    except (IOError, OSError):
+        font_title = ImageFont.load_default()
     draw.text((10, 10), "Dynamic Segment Detection Algorithm for Motincodes", fill="black", font=font_title)
 
     # Draw headers and segments
@@ -2126,3 +2140,30 @@ def merge_gifs_side_by_side(gif1_path, gif2_path, output_path, default_duration=
         loop=0,
         duration=duration
     )
+
+
+def merge_gifs_vertical(anim_path, timeline_gif_path, output_path, default_duration=100):
+    """Stack animation on top of timeline (animation top, timeline bottom). anim_path can be .mp4 or .gif."""
+    if 'mp4' in anim_path:
+        vid = imageio.get_reader(anim_path, 'ffmpeg')
+        frames_top = [Image.fromarray(f.copy()).convert('RGBA') for f in vid]
+    else:
+        anim = Image.open(anim_path)
+        frames_top = [f.copy().convert('RGBA') for f in ImageSequence.Iterator(anim)]
+    timeline = Image.open(timeline_gif_path)
+    frames_bottom = [f.copy().convert('RGBA') for f in ImageSequence.Iterator(timeline)]
+    n = min(len(frames_top), len(frames_bottom))
+    frames_top = frames_top[:n]
+    frames_bottom = frames_bottom[:n]
+    w_top, h_top = frames_top[0].size
+    w_bot, h_bot = frames_bottom[0].size
+    w = max(w_top, w_bot)
+    h = h_top + h_bot
+    new_frames = []
+    for ft, fb in zip(frames_top, frames_bottom):
+        out = Image.new('RGBA', (w, h))
+        out.paste(ft, ((w - w_top) // 2, 0))
+        out.paste(fb, ((w - w_bot) // 2, h_top))
+        new_frames.append(out)
+    duration = (timeline.info.get('duration', default_duration) if getattr(timeline, 'info', None) else default_duration) or default_duration
+    new_frames[0].save(output_path, save_all=True, append_images=new_frames[1:], loop=0, duration=duration)

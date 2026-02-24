@@ -40,13 +40,22 @@ def c2c(tensor):
 
 
 imw, imh = 1600, 1600
-mv = MeshViewer(width=imw, height=imh, use_offscreen=True) # todo check this offscreen
+_mesh_viewer = None
+
+
+def _get_mesh_viewer():
+    """Lazy MeshViewer: created only when rendering is needed (avoids GL/EGL at import for caption-only use)."""
+    global _mesh_viewer
+    if _mesh_viewer is None:
+        _mesh_viewer = MeshViewer(width=imw, height=imh, use_offscreen=True)  # todo check this offscreen
+    return _mesh_viewer
 
 
 def image_from_body_vertices(body_vertices, faces, viewpoints=[[]], color='grey'):
     body_mesh = trimesh.Trimesh(vertices=body_vertices, faces=faces, vertex_colors=np.tile(COLORS[color]+[1.] if isinstance(color,str) else color+[1.], (6890, 1)))
     body_mesh.apply_transform(trimesh.transformations.rotation_matrix(-np.radians(90), (1, 0, 0))) # base transformation
     imgs = []
+    mv = _get_mesh_viewer()
     # render the body under the different required viewpoints
     for vp in viewpoints:
         # potentially transform the mesh to look at it from another viewpoint
