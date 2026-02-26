@@ -4011,10 +4011,29 @@ def create_interface():
                             "Follower → Leader",
                             "Motion completion (Leader)",
                             "Motion completion (Follower)",
+                            "Leader motion → Leader MotionScript",
+                            "Follower motion → Follower MotionScript",
+                            "Leader MotionScript → Leader motion",
+                            "Follower MotionScript → Follower motion",
+                            "Caption → Leader MotionScript",
+                            "Caption → Follower MotionScript",
+                            "Caption → Both MotionScripts",
+                            "Leader MotionScript + Rel → Follower MotionScript",
+                            "Follower MotionScript + Rel → Leader MotionScript",
+                            "MotionScript completion (Leader)",
+                            "MotionScript completion (Follower)",
+                            "Caption + Leader MotionScript → Follower MotionScript",
+                            "Caption + Follower MotionScript → Leader MotionScript",
                         ],
                         value="Leader + Rel → Follower"
                     )
                     prompts_include_audio = gr.Checkbox(label="Include audio", value=False)
+                    prompts_include_motionscript = gr.Checkbox(label="Include MotionScript", value=False)
+                    prompts_output_motionscript_first = gr.Checkbox(
+                        label="Output MotionScript first",
+                        value=False,
+                        info="For leader/follower tasks: predict MotionScript then motion tokens (only when MotionScript is available)."
+                    )
                     prompts_btn = gr.Button("Generate Prompts", variant="primary")
                 with gr.Row():
                     prompts_prompt_text = gr.Textbox(
@@ -4047,6 +4066,15 @@ def create_interface():
                             "Pair to Relationship", "Caption to Leader", "Caption to Follower",
                             "Leader to Follower", "Follower to Leader",
                             "Motion completion (Leader)", "Motion completion (Follower)",
+                            "Leader motion to Leader MotionScript", "Follower motion to Follower MotionScript",
+                            "Leader MotionScript to Leader motion", "Follower MotionScript to Follower motion",
+                            "Caption to Leader MotionScript", "Caption to Follower MotionScript",
+                            "Caption to Both MotionScripts",
+                            "Leader MotionScript + Rel to Follower MotionScript",
+                            "Follower MotionScript + Rel to Leader MotionScript",
+                            "MotionScript completion (Leader)", "MotionScript completion (Follower)",
+                            "Caption + Leader MotionScript to Follower MotionScript",
+                            "Caption + Follower MotionScript to Leader MotionScript",
                         ],
                         value="Leader + Rel to Follower"
                     )
@@ -4213,7 +4241,7 @@ def create_interface():
         )
         
         # Example-Prompts: build InterHuman prompt/target text for current sample and task
-        def on_prompts_generate(idx_val, task_choice, include_audio_val):
+        def on_prompts_generate(idx_val, task_choice, include_audio_val, include_motionscript_val, output_motionscript_first_val):
             try:
                 from models.training_utils import build_prompt_interhuman_salsa
                 idx = int(idx_val) if idx_val is not None else 0
@@ -4232,6 +4260,14 @@ def create_interface():
                 audio_tokens = sample.get("audio_tokens")
                 if audio_tokens is not None:
                     audio_tokens = np.asarray(audio_tokens).ravel().tolist()
+                ms_L = sample.get("ms_desc_L")
+                ms_F = sample.get("ms_des_F")
+                if ms_L is not None and not isinstance(ms_L, str):
+                    ms_L = " --> ".join(str(x) for x in ms_L) if (isinstance(ms_L, (list, tuple)) and ms_L) else ""
+                if ms_F is not None and not isinstance(ms_F, str):
+                    ms_F = " --> ".join(str(x) for x in ms_F) if (isinstance(ms_F, (list, tuple)) and ms_F) else ""
+                ms_L = (ms_L or "").strip() if isinstance(ms_L, str) else ""
+                ms_F = (ms_F or "").strip() if isinstance(ms_F, str) else ""
                 task_map = {
                     "Leader + Rel → Follower": "leader_rel_to_follower",
                     "Follower + Rel → Leader": "follower_rel_to_leader",
@@ -4244,6 +4280,19 @@ def create_interface():
                     "Follower → Leader": "follower_to_leader",
                     "Motion completion (Leader)": "motion_completion_leader",
                     "Motion completion (Follower)": "motion_completion_follower",
+                    "Leader motion → Leader MotionScript": "leader_motion_to_motionscript",
+                    "Follower motion → Follower MotionScript": "follower_motion_to_motionscript",
+                    "Leader MotionScript → Leader motion": "motionscript_to_leader_motion",
+                    "Follower MotionScript → Follower motion": "motionscript_to_follower_motion",
+                    "Caption → Leader MotionScript": "caption_to_leader_motionscript",
+                    "Caption → Follower MotionScript": "caption_to_follower_motionscript",
+                    "Caption → Both MotionScripts": "caption_to_both_motionscripts",
+                    "Leader MotionScript + Rel → Follower MotionScript": "leader_motionscript_rel_to_follower_motionscript",
+                    "Follower MotionScript + Rel → Leader MotionScript": "follower_motionscript_rel_to_leader_motionscript",
+                    "MotionScript completion (Leader)": "motionscript_completion_leader",
+                    "MotionScript completion (Follower)": "motionscript_completion_follower",
+                    "Caption + Leader MotionScript → Follower MotionScript": "caption_leader_motionscript_to_follower_motionscript",
+                    "Caption + Follower MotionScript → Leader MotionScript": "caption_follower_motionscript_to_leader_motionscript",
                 }
                 task_key = task_map.get(task_choice, "leader_rel_to_follower")
                 metadata = app.get_metadata_info(idx)
@@ -4261,19 +4310,27 @@ def create_interface():
                     level=level,
                     audio_tokens=audio_tokens,
                     include_audio=bool(include_audio_val),
+                    include_motionscript=bool(include_motionscript_val),
+                    motionscript_leader=ms_L or None,
+                    motionscript_follower=ms_F or None,
+                    output_motionscript_first=bool(output_motionscript_first_val),
                 )
                 raw_info = f"Sample {idx} | Leader tokens: {len(leader_tokens)}, Rel: {len(relationship_tokens)}, Follower: {len(follower_tokens)}"
                 if include_audio_val and audio_tokens:
                     raw_info += f" | Audio tokens: {len(audio_tokens)}"
+                if include_motionscript_val and (ms_L or ms_F):
+                    raw_info += " | MotionScript included"
+                if output_motionscript_first_val and (ms_L or ms_F):
+                    raw_info += " | Output: MotionScript first, then motion"
                 return prompt_text, target_text, raw_info
             except Exception as e:
                 import traceback
                 err = f"Error: {str(e)}\n{traceback.format_exc()}"
                 return "", "", err
-        
+
         prompts_btn.click(
             fn=on_prompts_generate,
-            inputs=[sample_idx, prompts_task, prompts_include_audio],
+            inputs=[sample_idx, prompts_task, prompts_include_audio, prompts_include_motionscript, prompts_output_motionscript_first],
             outputs=[prompts_prompt_text, prompts_target_text, prompts_raw_info]
         )
 
@@ -4311,12 +4368,33 @@ def create_interface():
                     "Follower to Leader": "follower_to_leader",
                     "Motion completion (Leader)": "motion_completion_leader",
                     "Motion completion (Follower)": "motion_completion_follower",
+                    "Leader motion to Leader MotionScript": "leader_motion_to_motionscript",
+                    "Follower motion to Follower MotionScript": "follower_motion_to_motionscript",
+                    "Leader MotionScript to Leader motion": "motionscript_to_leader_motion",
+                    "Follower MotionScript to Follower motion": "motionscript_to_follower_motion",
+                    "Caption to Leader MotionScript": "caption_to_leader_motionscript",
+                    "Caption to Follower MotionScript": "caption_to_follower_motionscript",
+                    "Caption to Both MotionScripts": "caption_to_both_motionscripts",
+                    "Leader MotionScript + Rel to Follower MotionScript": "leader_motionscript_rel_to_follower_motionscript",
+                    "Follower MotionScript + Rel to Leader MotionScript": "follower_motionscript_rel_to_leader_motionscript",
+                    "MotionScript completion (Leader)": "motionscript_completion_leader",
+                    "MotionScript completion (Follower)": "motionscript_completion_follower",
+                    "Caption + Leader MotionScript to Follower MotionScript": "caption_leader_motionscript_to_follower_motionscript",
+                    "Caption + Follower MotionScript to Leader MotionScript": "caption_follower_motionscript_to_leader_motionscript",
                 }
                 task_key = task_map.get(task_choice, "leader_rel_to_follower")
                 metadata = app.get_metadata_info(idx)
                 move_annotations = metadata.get("moves", []) if metadata and "error" not in metadata else []
                 level = metadata.get("level") if metadata and "error" not in metadata else None
                 caption = metadata.get("caption") if metadata and "error" not in metadata else None
+                ms_L = sample.get("ms_desc_L")
+                ms_F = sample.get("ms_des_F")
+                if ms_L is not None and not isinstance(ms_L, str):
+                    ms_L = " --> ".join(str(x) for x in ms_L) if (isinstance(ms_L, (list, tuple)) and ms_L) else ""
+                if ms_F is not None and not isinstance(ms_F, str):
+                    ms_F = " --> ".join(str(x) for x in ms_F) if (isinstance(ms_F, (list, tuple)) and ms_F) else ""
+                ms_L = (ms_L or "").strip() if isinstance(ms_L, str) else ""
+                ms_F = (ms_F or "").strip() if isinstance(ms_F, str) else ""
                 prompt_text, gt_target_text = build_prompt_interhuman_salsa(
                     leader_tokens=leader_tokens,
                     follower_tokens=follower_tokens,
@@ -4327,6 +4405,9 @@ def create_interface():
                     caption=caption,
                     audio_tokens=audio_tokens,
                     include_audio=bool(include_audio_val),
+                    include_motionscript=bool(ms_L or ms_F),
+                    motionscript_leader=ms_L or None,
+                    motionscript_follower=ms_F or None,
                 )
                 args = get_args_parser()
                 args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

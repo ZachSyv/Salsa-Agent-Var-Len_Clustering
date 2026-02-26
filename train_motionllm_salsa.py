@@ -113,9 +113,9 @@ def main():
     if args.use_wandb:
         wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=vars(args))
 
-    # Always use MDM cache format (cache was created with is_MDM=True, so it has _MDM suffix)
-    # Both humanml3d and interhuman use the same MDM cache (cache contains both HML3D and InterHuman data)
-    args.is_MDM = True
+    # Cache path: is_MDM=True -> lmdb_dir + cache_suffix + '_MDM' (no MotionScript); is_MDM=False -> + cache_suffix only (with MotionScript)
+    # Default MDM (backward compat); pass --no-MDM to use non-MDM cache and train with MotionScript data
+    args.is_MDM = not getattr(args, 'no_MDM', False)
     lmdb_dir = getattr(args, 'lmdb_dir', 'dataset_processed_New/lmdb_Salsa_pair/lmdb_train')
     # n_poses, subdivision_stride, pose_resampling_fps align with demo.py and README cache creation
     n_poses, subdivision_stride, pose_resampling_fps = 100, 50, 20
@@ -141,8 +141,7 @@ def main2():
     No MotionLLM/VQVAE loading — for verifying data flow and prompt correctness without GPU memory."""
     args = get_args_parser()
     args.device = torch.device("cpu")
-    if getattr(args, 'motion_repr_type', 'humanml3d') == 'humanml3d':
-        args.is_MDM = True
+    args.is_MDM = not getattr(args, 'no_MDM', False)
     lmdb_dir = getattr(args, 'lmdb_dir', 'dataset_processed_New/lmdb_Salsa_pair/lmdb_train')
     n_poses, subdivision_stride, pose_resampling_fps = 100, 50, 20
     batch_size = getattr(args, 'train_batch_size', 4)

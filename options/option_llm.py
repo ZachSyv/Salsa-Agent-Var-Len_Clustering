@@ -8,7 +8,8 @@ def get_args_parser():
     ## device
     parser.add_argument('--device', type=str, default='cuda:0', help='device')
     parser.add_argument('--is-baseline', action='store_true', help='whether to use baseline model architecture')
-    parser.add_argument('--is-MDM', action='store_true', help='whether to use MDM data format')
+    parser.add_argument('--is-MDM', action='store_true', help='use MDM cache (no MotionScript); default when not passed')
+    parser.add_argument('--no-MDM', action='store_true', help='use non-MDM cache (with MotionScript); overrides --is-MDM')
     parser.add_argument('--motion-repr-type', type=str, default='humanml3d', choices=['humanml3d', 'interhuman'],
                         help='humanml3d: HumanML3D + <Motion_i>; interhuman: InterHuman/Rel + <IH_i>, <Rel_i>')
     parser.add_argument('--nb-ih-code', type=int, default=512, help='InterHuman codebook size (if motion-repr-type=interhuman)')

@@ -532,15 +532,49 @@ def process_batch_Salsa(tokenizer, batch_aux_info, batch_ms_desc_L, batch_ms_des
 
     batch_input_ids, batch_target_ids = [], []
     use_interhuman = (motion_repr_type == 'interhuman') and (batch_interhuman_data is not None)
+    n_samples = len(batch_aux_info) if hasattr(batch_aux_info, '__len__') else 1
+
+    def _ms_str(x):
+        if x is None:
+            return ""
+        if isinstance(x, str):
+            return x.strip()
+        if isinstance(x, (list, tuple)):
+            return " --> ".join(str(s).strip() for s in x)
+        return str(x).strip()
+
+    # When InterHuman: restrict to 11 tasks if batch has no MotionScript (e.g. MDM cache)
+    has_script = False
+    allowed_ih_tasks = INTERHUMAN_TASKS
+    if use_interhuman and n_samples > 0:
+        ms0_L = batch_ms_desc_L[0] if n_samples > 1 else batch_ms_desc_L
+        ms0_F = batch_ms_des_F[0] if n_samples > 1 else batch_ms_des_F
+        has_script = bool(_ms_str(ms0_L) or _ms_str(ms0_F))
+        if not has_script:
+            allowed_ih_tasks = INTERHUMAN_TASKS_NO_MS
+
     if not current_batch_task:
         current_batch_task = random.choice(all_tasks)
-    # Stage 1 (multi-task): for InterHuman path use one random task per batch so all samples in the batch share the same task
     if use_interhuman and (not current_batch_task or current_batch_task not in INTERHUMAN_TASKS):
-        batch_interhuman_task = random.choice(INTERHUMAN_TASKS)
+        batch_interhuman_task = random.choice(allowed_ih_tasks)
     else:
         batch_interhuman_task = current_batch_task
 
-    n_samples = len(batch_aux_info) if hasattr(batch_aux_info, '__len__') else 1
+    # For the 11 non-MotionScript tasks with script data: randomly include MotionScript; if included, randomly output it first
+    batch_include_ms = True
+    batch_output_ms_first = False
+    if use_interhuman and batch_interhuman_task in INTERHUMAN_TASKS_NO_MS:
+        if has_script:
+            batch_include_ms = random.random() < 0.5
+            out_type = INTERHUMAN_TASK_OUTPUT_TYPE.get(batch_interhuman_task, "")
+            if batch_include_ms and out_type in ("leader", "follower"):
+                batch_output_ms_first = random.random() < 0.5
+        else:
+            batch_include_ms = False
+    elif use_interhuman and has_script:
+        batch_include_ms = True
+        batch_output_ms_first = False
+
     for i in range(n_samples):
         aux = batch_aux_info[i] if n_samples > 1 else batch_aux_info
         ms_desc_L = batch_ms_desc_L[i] if n_samples > 1 else batch_ms_desc_L
@@ -557,23 +591,27 @@ def process_batch_Salsa(tokenizer, batch_aux_info, batch_ms_desc_L, batch_ms_des
             follower_tokens = torch.as_tensor(ih['follower_tokens']).cpu().ravel().tolist()
             relationship_tokens = torch.as_tensor(ih['relationship_tokens']).cpu().ravel().tolist()
             aud_list = torch.as_tensor(audio_tokens).cpu().ravel().tolist() if audio_tokens is not None else None
-            
-            # Use same task for entire batch in stage 1 (batch_interhuman_task); or current_batch_task when stage 2
-            task = batch_interhuman_task if (batch_interhuman_task and batch_interhuman_task in INTERHUMAN_TASKS) else random.choice(INTERHUMAN_TASKS)
-            
-            # Extract move_annotations from aux_info if available
+
+            ms_leader_str = _ms_str(ms_desc_L)
+            ms_follower_str = _ms_str(ms_des_F)
+            has_ms_data = bool(ms_leader_str or ms_follower_str)
+            if batch_interhuman_task in INTERHUMAN_TASKS_NO_MS:
+                use_motionscript = batch_include_ms and has_ms_data
+                output_motionscript_first = batch_output_ms_first if use_motionscript else False
+            else:
+                use_motionscript = has_ms_data
+                output_motionscript_first = False
+
+            task = batch_interhuman_task if (batch_interhuman_task and batch_interhuman_task in INTERHUMAN_TASKS) else random.choice(allowed_ih_tasks)
+
             move_annotations = None
             if isinstance(aux, dict) and 'dance_moves' in aux:
                 move_annotations = aux['dance_moves']
-            
-            # Use caption from aux_info if available, otherwise None
             caption = None
             if isinstance(aux, dict) and 'caption' in aux:
                 caption = aux['caption']
-            
-            # Use include_audio parameter (from args) instead of random
             use_audio = include_audio and (aud_list is not None and len(aud_list) > 0)
-            
+
             prompt_text, target_text = build_prompt_interhuman_salsa(
                 leader_tokens=leader_tokens,
                 follower_tokens=follower_tokens,
@@ -584,6 +622,10 @@ def process_batch_Salsa(tokenizer, batch_aux_info, batch_ms_desc_L, batch_ms_des
                 caption=caption,
                 audio_tokens=aud_list,
                 include_audio=use_audio,
+                include_motionscript=use_motionscript,
+                motionscript_leader=ms_leader_str or None,
+                motionscript_follower=ms_follower_str or None,
+                output_motionscript_first=output_motionscript_first,
             )
             one_input_ids, one_target_ids = interhuman_prompt_target_to_ids(tokenizer, prompt_text, target_text)
         else:
@@ -982,6 +1024,9 @@ INTERHUMAN_PROMPT_DELIMITERS = {
     "label_follower_motion": "Follower motion: ",
     "label_relationship": "Relationship: ",
     "label_music": "Music: ",
+    "label_motionscript": "MotionScript: ",
+    "motionscript_open": "<MotionScript>",
+    "motionscript_close": "</MotionScript>",
     "instruction_leader_rel_to_follower": "### Instruction:\nGiven salsa leader motion and relationship, predict salsa follower motion.\n\n",
     "instruction_leader_rel_to_follower_audio": "### Instruction:\nGiven salsa leader motion, relationship, and music, predict salsa follower motion.\n\n",
     "instruction_follower_rel_to_leader": "### Instruction:\nGiven salsa follower motion and relationship, predict salsa leader motion.\n\n",
@@ -1004,6 +1049,33 @@ INTERHUMAN_PROMPT_DELIMITERS = {
     "instruction_motion_completion_leader_audio": "### Instruction:\nGiven a partial salsa leader motion and music, complete the motion.\n\n",
     "instruction_motion_completion_follower": "### Instruction:\nGiven a partial salsa follower motion, complete the motion.\n\n",
     "instruction_motion_completion_follower_audio": "### Instruction:\nGiven a partial salsa follower motion and music, complete the motion.\n\n",
+    # When output_motionscript_first=True: predict MotionScript (fine-grained description) then motion
+    "instruction_leader_rel_to_follower_motionscript_first": "### Instruction:\nGiven salsa leader motion and relationship, predict the Follower MotionScript (fine-grained motion description) and then the follower motion.\n\n",
+    "instruction_follower_rel_to_leader_motionscript_first": "### Instruction:\nGiven salsa follower motion and relationship, predict the Leader MotionScript (fine-grained motion description) and then the leader motion.\n\n",
+    "instruction_caption_leader_rel_to_follower_motionscript_first": "### Instruction:\nGiven the salsa description, leader motion, and relationship, predict the Follower MotionScript (fine-grained motion description) and then the follower motion.\n\n",
+    "instruction_caption_follower_rel_to_leader_motionscript_first": "### Instruction:\nGiven the salsa description, follower motion, and relationship, predict the Leader MotionScript (fine-grained motion description) and then the leader motion.\n\n",
+    "instruction_caption_to_leader_motionscript_first": "### Instruction:\nGenerate the Leader MotionScript (fine-grained motion description) and then the leader motion from the description.\n\n",
+    "instruction_caption_to_follower_motionscript_first": "### Instruction:\nGenerate the Follower MotionScript (fine-grained motion description) and then the follower motion from the description.\n\n",
+    "instruction_leader_to_follower_motionscript_first": "### Instruction:\nGiven salsa leader motion, predict the Follower MotionScript (fine-grained motion description) and then the follower motion.\n\n",
+    "instruction_follower_to_leader_motionscript_first": "### Instruction:\nGiven salsa follower motion, predict the Leader MotionScript (fine-grained motion description) and then the leader motion.\n\n",
+    "instruction_motion_completion_leader_motionscript_first": "### Instruction:\nGiven a partial salsa leader motion, complete the Leader MotionScript (fine-grained motion description) and then the rest of the motion.\n\n",
+    "instruction_motion_completion_follower_motionscript_first": "### Instruction:\nGiven a partial salsa follower motion, complete the Follower MotionScript (fine-grained motion description) and then the rest of the motion.\n\n",
+    # Optional suffix when include_motionscript=True (input includes MotionScript block)
+    "instruction_suffix_input_motionscript": " Input may include MotionScript (fine-grained motion description).\n\n",
+    # MotionScript-focused tasks
+    "instruction_leader_motion_to_motionscript": "### Instruction:\nGiven salsa leader motion, describe it as a MotionScript (fine-grained motion description).\n\n",
+    "instruction_follower_motion_to_motionscript": "### Instruction:\nGiven salsa follower motion, describe it as a MotionScript (fine-grained motion description).\n\n",
+    "instruction_motionscript_to_leader_motion": "### Instruction:\nGiven the Leader MotionScript description, generate the salsa leader motion.\n\n",
+    "instruction_motionscript_to_follower_motion": "### Instruction:\nGiven the Follower MotionScript description, generate the salsa follower motion.\n\n",
+    "instruction_caption_to_leader_motionscript": "### Instruction:\nGiven the salsa description, generate the Leader MotionScript.\n\n",
+    "instruction_caption_to_follower_motionscript": "### Instruction:\nGiven the salsa description, generate the Follower MotionScript.\n\n",
+    "instruction_caption_to_both_motionscripts": "### Instruction:\nGiven the salsa description, generate both Leader and Follower MotionScripts.\n\n",
+    "instruction_leader_motionscript_rel_to_follower_motionscript": "### Instruction:\nGiven Leader MotionScript and relationship, predict the Follower MotionScript.\n\n",
+    "instruction_follower_motionscript_rel_to_leader_motionscript": "### Instruction:\nGiven Follower MotionScript and relationship, predict the Leader MotionScript.\n\n",
+    "instruction_motionscript_completion_leader": "### Instruction:\nGiven the first part of the Leader MotionScript, complete the rest.\n\n",
+    "instruction_motionscript_completion_follower": "### Instruction:\nGiven the first part of the Follower MotionScript, complete the rest.\n\n",
+    "instruction_caption_leader_motionscript_to_follower_motionscript": "### Instruction:\nGiven the salsa description and Leader MotionScript, predict the Follower MotionScript.\n\n",
+    "instruction_caption_follower_motionscript_to_leader_motionscript": "### Instruction:\nGiven the salsa description and Follower MotionScript, predict the Leader MotionScript.\n\n",
     "input_section": "### Input:\n",
     "moves_section": "### Moves in this window:\n",
     "system_prompt": (
@@ -1018,12 +1090,14 @@ INTERHUMAN_PROMPT_DELIMITERS = {
 INTERHUMAN_SPECIAL_TOKENS = [
     "<LeaderMotion>", "</LeaderMotion>",
     "<FollowerMotion>", "</FollowerMotion>",
-    "<Relationship>", "</Relationship>"
+    "<Relationship>", "</Relationship>",
+    "<MotionScript>", "</MotionScript>",
 ]
 
 # Canonical list of InterHuman Salsa tasks (for UI, training, and validation).
-# Excludes motionscript-based tasks; all support optional audio via include_audio.
-INTERHUMAN_TASKS = [
+# Includes motion-prediction tasks and MotionScript-focused tasks.
+# Tasks that do not require MotionScript in cache (use when cache has no script, e.g. MDM)
+INTERHUMAN_TASKS_NO_MS = [
     "leader_rel_to_follower",
     "follower_rel_to_leader",
     "caption_leader_rel_to_follower",
@@ -1036,8 +1110,24 @@ INTERHUMAN_TASKS = [
     "motion_completion_leader",
     "motion_completion_follower",
 ]
+INTERHUMAN_TASKS = INTERHUMAN_TASKS_NO_MS + [
+    # MotionScript-focused tasks (require non-MDM cache)
+    "leader_motion_to_motionscript",
+    "follower_motion_to_motionscript",
+    "motionscript_to_leader_motion",
+    "motionscript_to_follower_motion",
+    "caption_to_leader_motionscript",
+    "caption_to_follower_motionscript",
+    "caption_to_both_motionscripts",
+    "leader_motionscript_rel_to_follower_motionscript",
+    "follower_motionscript_rel_to_leader_motionscript",
+    "motionscript_completion_leader",
+    "motionscript_completion_follower",
+    "caption_leader_motionscript_to_follower_motionscript",
+    "caption_follower_motionscript_to_leader_motionscript",
+]
 
-# For inference: which output type each task predicts ("leader" | "follower" | "relationship")
+# For inference: which output type each task predicts ("leader" | "follower" | "relationship" | "motion_script_leader" | "motion_script_follower" | "motion_script_both")
 INTERHUMAN_TASK_OUTPUT_TYPE = {
     "leader_rel_to_follower": "follower",
     "follower_rel_to_leader": "leader",
@@ -1050,6 +1140,19 @@ INTERHUMAN_TASK_OUTPUT_TYPE = {
     "follower_to_leader": "leader",
     "motion_completion_leader": "leader",
     "motion_completion_follower": "follower",
+    "leader_motion_to_motionscript": "motion_script_leader",
+    "follower_motion_to_motionscript": "motion_script_follower",
+    "motionscript_to_leader_motion": "leader",
+    "motionscript_to_follower_motion": "follower",
+    "caption_to_leader_motionscript": "motion_script_leader",
+    "caption_to_follower_motionscript": "motion_script_follower",
+    "caption_to_both_motionscripts": "motion_script_both",
+    "leader_motionscript_rel_to_follower_motionscript": "motion_script_follower",
+    "follower_motionscript_rel_to_leader_motionscript": "motion_script_leader",
+    "motionscript_completion_leader": "motion_script_leader",
+    "motionscript_completion_follower": "motion_script_follower",
+    "caption_leader_motionscript_to_follower_motionscript": "motion_script_follower",
+    "caption_follower_motionscript_to_leader_motionscript": "motion_script_leader",
 }
 
 
@@ -1100,6 +1203,10 @@ def build_prompt_interhuman_salsa(
     caption=None,
     audio_tokens=None,
     include_audio=False,
+    include_motionscript=False,
+    motionscript_leader=None,
+    motionscript_follower=None,
+    output_motionscript_first=False,
     completion_split_ratio=0.3,
 ):
     """
@@ -1116,6 +1223,10 @@ def build_prompt_interhuman_salsa(
         caption: optional str; if None and task is caption_*, built from level + move summary
         audio_tokens: optional list/int array of audio token ids; used when include_audio=True
         include_audio: if True and audio_tokens provided, appends audio block to input and uses _audio instruction
+        include_motionscript: if True and motionscript_leader/follower provided, appends MotionScript block to input
+        motionscript_leader: optional str (or list to be joined with '-->'); leader MotionScript text
+        motionscript_follower: optional str (or list to be joined with '-->'); follower MotionScript text
+        output_motionscript_first: if True, for leader/follower-output tasks the response is MotionScript first then motion (prompt ends with "MotionScript: <MotionScript> ", target = script + " </MotionScript> " + label + motion tokens)
         completion_split_ratio: for motion_completion_* tasks, fraction of tokens used as input (default 0.3)
 
     Returns:
@@ -1130,6 +1241,48 @@ def build_prompt_interhuman_salsa(
         _audio_list = list(audio_tokens)
     use_audio = include_audio and len(_audio_list) > 0
 
+    def _ms_str(x):
+        if x is None:
+            return ""
+        if isinstance(x, str):
+            return x.strip()
+        if isinstance(x, (list, tuple)):
+            return " --> ".join(str(s).strip() for s in x)
+        return str(x).strip()
+
+    _ms_leader = _ms_str(motionscript_leader)
+    _ms_follower = _ms_str(motionscript_follower)
+    use_motionscript = include_motionscript and (_ms_leader or _ms_follower)
+
+    # Which role(s) MotionScript to include in INPUT: only the input role(s), not the output role.
+    def input_motionscript_roles():
+        # MotionScript-focused tasks: explicit input roles
+        ms_input_roles = {
+            "leader_motion_to_motionscript": (False, False),
+            "follower_motion_to_motionscript": (False, False),
+            "motionscript_to_leader_motion": (True, False),
+            "motionscript_to_follower_motion": (False, True),
+            "caption_to_leader_motionscript": (False, False),
+            "caption_to_follower_motionscript": (False, False),
+            "caption_to_both_motionscripts": (False, False),
+            "leader_motionscript_rel_to_follower_motionscript": (True, False),
+            "follower_motionscript_rel_to_leader_motionscript": (False, True),
+            "motionscript_completion_leader": (True, False),
+            "motionscript_completion_follower": (False, True),
+            "caption_leader_motionscript_to_follower_motionscript": (True, False),
+            "caption_follower_motionscript_to_leader_motionscript": (False, True),
+        }
+        if task in ms_input_roles:
+            return ms_input_roles[task]
+        out_type = INTERHUMAN_TASK_OUTPUT_TYPE.get(task)
+        if out_type == "follower":
+            return (True, False)
+        if out_type == "leader":
+            return (False, True)
+        if out_type == "relationship":
+            return (True, True)
+        return (False, False)
+
     def fmt_leader():
         return D["leader_motion_open"] + " " + " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
 
@@ -1142,11 +1295,21 @@ def build_prompt_interhuman_salsa(
     def fmt_audio():
         return D["audio_open"] + " " + " ".join(D["audio_token"].format(int(t)) for t in _audio_list) + " " + D["audio_close"]
 
-    # Order: caption/texts → audio → input motion → input relation. Each block gets a textual label.
-    def build_input_body(caption_txt=None, audio_block=None, motion_blocks=None, relation_block=None):
+    def fmt_motionscript_input(include_leader_role, include_follower_role):
+        parts = []
+        if include_leader_role and _ms_leader:
+            parts.append("Leader: " + _ms_leader)
+        if include_follower_role and _ms_follower:
+            parts.append("Follower: " + _ms_follower)
+        return "\n".join(parts) if parts else ""
+
+    # Order: caption → motionscript → audio → input motion → input relation. Each block gets a textual label.
+    def build_input_body(caption_txt=None, motionscript_block=None, audio_block=None, motion_blocks=None, relation_block=None):
         parts = []
         if caption_txt:
             parts.append(caption_txt.strip())
+        if motionscript_block:
+            parts.append(D["label_motionscript"] + D["motionscript_open"] + " " + motionscript_block + " " + D["motionscript_close"])
         if audio_block:
             parts.append(D["label_music"] + audio_block)
         for label, content in motion_blocks or []:
@@ -1157,19 +1320,34 @@ def build_prompt_interhuman_salsa(
         return "\n\n".join(parts) + "\n\n"
 
     if task == "leader_rel_to_follower":
-        instruction = D.get("instruction_leader_rel_to_follower_audio", D["instruction_leader_rel_to_follower"]) if use_audio else D["instruction_leader_rel_to_follower"]
-        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader())], relation_block=(D["label_relationship"], fmt_relationship()))
+        if output_motionscript_first and _ms_follower:
+            instruction = D["instruction_leader_rel_to_follower_motionscript_first"]
+        else:
+            instruction = D.get("instruction_leader_rel_to_follower_audio", D["instruction_leader_rel_to_follower"]) if use_audio else D["instruction_leader_rel_to_follower"]
+        if use_motionscript:
+            instruction = instruction.rstrip() + D["instruction_suffix_input_motionscript"]
+        input_body = build_input_body(motionscript_block=fmt_motionscript_input(*input_motionscript_roles()) if use_motionscript else None, audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader())], relation_block=(D["label_relationship"], fmt_relationship()))
         prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
         target_text = " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
 
     elif task == "follower_rel_to_leader":
-        instruction = D.get("instruction_follower_rel_to_leader_audio", D["instruction_follower_rel_to_leader"]) if use_audio else D["instruction_follower_rel_to_leader"]
-        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], fmt_follower())], relation_block=(D["label_relationship"], fmt_relationship()))
+        if output_motionscript_first and _ms_leader:
+            instruction = D["instruction_follower_rel_to_leader_motionscript_first"]
+        else:
+            instruction = D.get("instruction_follower_rel_to_leader_audio", D["instruction_follower_rel_to_leader"]) if use_audio else D["instruction_follower_rel_to_leader"]
+        if use_motionscript:
+            instruction = instruction.rstrip() + D["instruction_suffix_input_motionscript"]
+        input_body = build_input_body(motionscript_block=fmt_motionscript_input(*input_motionscript_roles()) if use_motionscript else None, audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], fmt_follower())], relation_block=(D["label_relationship"], fmt_relationship()))
         prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
         target_text = " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
 
     elif task == "caption_leader_rel_to_follower":
-        instruction = D.get("instruction_caption_leader_rel_to_follower_audio", D["instruction_caption_leader_rel_to_follower"]) if use_audio else D["instruction_caption_leader_rel_to_follower"]
+        if output_motionscript_first and _ms_follower:
+            instruction = D["instruction_caption_leader_rel_to_follower_motionscript_first"]
+        else:
+            instruction = D.get("instruction_caption_leader_rel_to_follower_audio", D["instruction_caption_leader_rel_to_follower"]) if use_audio else D["instruction_caption_leader_rel_to_follower"]
+        if use_motionscript:
+            instruction = instruction.rstrip() + D["instruction_suffix_input_motionscript"]
         if caption is None:
             caption_parts = []
             if level:
@@ -1178,12 +1356,17 @@ def build_prompt_interhuman_salsa(
             if move_summary:
                 caption_parts.append(f"Moves: {move_summary}")
             caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
-        input_body = build_input_body(caption_txt=caption.strip(), audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader())], relation_block=(D["label_relationship"], fmt_relationship()))
+        input_body = build_input_body(caption_txt=caption.strip(), motionscript_block=fmt_motionscript_input(*input_motionscript_roles()) if use_motionscript else None, audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader())], relation_block=(D["label_relationship"], fmt_relationship()))
         prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
         target_text = " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
 
     elif task == "caption_follower_rel_to_leader":
-        instruction = D.get("instruction_caption_follower_rel_to_leader_audio", D["instruction_caption_follower_rel_to_leader"]) if use_audio else D["instruction_caption_follower_rel_to_leader"]
+        if output_motionscript_first and _ms_leader:
+            instruction = D["instruction_caption_follower_rel_to_leader_motionscript_first"]
+        else:
+            instruction = D.get("instruction_caption_follower_rel_to_leader_audio", D["instruction_caption_follower_rel_to_leader"]) if use_audio else D["instruction_caption_follower_rel_to_leader"]
+        if use_motionscript:
+            instruction = instruction.rstrip() + D["instruction_suffix_input_motionscript"]
         if caption is None:
             caption_parts = []
             if level:
@@ -1192,18 +1375,25 @@ def build_prompt_interhuman_salsa(
             if move_summary:
                 caption_parts.append(f"Moves: {move_summary}")
             caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
-        input_body = build_input_body(caption_txt=caption.strip(), audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], fmt_follower())], relation_block=(D["label_relationship"], fmt_relationship()))
+        input_body = build_input_body(caption_txt=caption.strip(), motionscript_block=fmt_motionscript_input(*input_motionscript_roles()) if use_motionscript else None, audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], fmt_follower())], relation_block=(D["label_relationship"], fmt_relationship()))
         prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
         target_text = " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
 
     elif task == "pair_to_relationship":
         instruction = D.get("instruction_pair_to_relationship_audio", D["instruction_pair_to_relationship"]) if use_audio else D["instruction_pair_to_relationship"]
-        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader()), (D["label_follower_motion"], fmt_follower())])
+        if use_motionscript:
+            instruction = instruction.rstrip() + D["instruction_suffix_input_motionscript"]
+        input_body = build_input_body(motionscript_block=fmt_motionscript_input(*input_motionscript_roles()) if use_motionscript else None, audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader()), (D["label_follower_motion"], fmt_follower())])
         prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_relationship"] + D["relationship_open"] + " "
         target_text = " ".join(D["rel_token"].format(int(t)) for t in relationship_tokens) + " " + D["relationship_close"]
 
     elif task == "caption_to_leader":
-        instruction = D.get("instruction_caption_to_leader_audio", D["instruction_caption_to_leader"]) if use_audio else D["instruction_caption_to_leader"]
+        if output_motionscript_first and _ms_leader:
+            instruction = D["instruction_caption_to_leader_motionscript_first"]
+        else:
+            instruction = D.get("instruction_caption_to_leader_audio", D["instruction_caption_to_leader"]) if use_audio else D["instruction_caption_to_leader"]
+        if use_motionscript:
+            instruction = instruction.rstrip() + D["instruction_suffix_input_motionscript"]
         if caption is None:
             caption_parts = []
             if level:
@@ -1212,12 +1402,108 @@ def build_prompt_interhuman_salsa(
             if move_summary:
                 caption_parts.append(f"Moves: {move_summary}")
             caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
-        input_body = build_input_body(caption_txt=caption.strip(), audio_block=fmt_audio() if use_audio else None)
+        input_body = build_input_body(caption_txt=caption.strip(), motionscript_block=fmt_motionscript_input(*input_motionscript_roles()) if use_motionscript else None, audio_block=fmt_audio() if use_audio else None)
         prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
         target_text = " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
 
     elif task == "caption_to_follower":
-        instruction = D.get("instruction_caption_to_follower_audio", D["instruction_caption_to_follower"]) if use_audio else D["instruction_caption_to_follower"]
+        if output_motionscript_first and _ms_follower:
+            instruction = D["instruction_caption_to_follower_motionscript_first"]
+        else:
+            instruction = D.get("instruction_caption_to_follower_audio", D["instruction_caption_to_follower"]) if use_audio else D["instruction_caption_to_follower"]
+        if use_motionscript:
+            instruction = instruction.rstrip() + D["instruction_suffix_input_motionscript"]
+        if caption is None:
+            caption_parts = []
+            if level:
+                caption_parts.append(f"Level: {level}.")
+            move_summary = _format_move_summary_for_prompt(move_annotations or [])
+            if move_summary:
+                caption_parts.append(f"Moves: {move_summary}")
+            caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
+        input_body = build_input_body(caption_txt=caption.strip(), motionscript_block=fmt_motionscript_input(*input_motionscript_roles()) if use_motionscript else None, audio_block=fmt_audio() if use_audio else None)
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
+
+    elif task == "leader_to_follower":
+        if output_motionscript_first and _ms_follower:
+            instruction = D["instruction_leader_to_follower_motionscript_first"]
+        else:
+            instruction = D.get("instruction_leader_to_follower_audio", D["instruction_leader_to_follower"]) if use_audio else D["instruction_leader_to_follower"]
+        if use_motionscript:
+            instruction = instruction.rstrip() + D["instruction_suffix_input_motionscript"]
+        input_body = build_input_body(motionscript_block=fmt_motionscript_input(*input_motionscript_roles()) if use_motionscript else None, audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader())])
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
+
+    elif task == "follower_to_leader":
+        if output_motionscript_first and _ms_leader:
+            instruction = D["instruction_follower_to_leader_motionscript_first"]
+        else:
+            instruction = D.get("instruction_follower_to_leader_audio", D["instruction_follower_to_leader"]) if use_audio else D["instruction_follower_to_leader"]
+        if use_motionscript:
+            instruction = instruction.rstrip() + D["instruction_suffix_input_motionscript"]
+        input_body = build_input_body(motionscript_block=fmt_motionscript_input(*input_motionscript_roles()) if use_motionscript else None, audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], fmt_follower())])
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
+
+    elif task == "motion_completion_leader":
+        if output_motionscript_first and _ms_leader:
+            instruction = D["instruction_motion_completion_leader_motionscript_first"]
+        else:
+            instruction = D.get("instruction_motion_completion_leader_audio", D["instruction_motion_completion_leader"]) if use_audio else D["instruction_motion_completion_leader"]
+        if use_motionscript:
+            instruction = instruction.rstrip() + D["instruction_suffix_input_motionscript"]
+        n = max(1, int(len(leader_tokens) * completion_split_ratio))
+        partial_tokens, rest_tokens = leader_tokens[:n], leader_tokens[n:]
+        partial_str = D["leader_motion_open"] + " " + " ".join(D["ih_token"].format(int(t)) for t in partial_tokens) + " " + D["leader_motion_close"]
+        input_body = build_input_body(motionscript_block=fmt_motionscript_input(*input_motionscript_roles()) if use_motionscript else None, audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], partial_str)])
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in rest_tokens) + " " + D["leader_motion_close"]
+
+    elif task == "motion_completion_follower":
+        if output_motionscript_first and _ms_follower:
+            instruction = D["instruction_motion_completion_follower_motionscript_first"]
+        else:
+            instruction = D.get("instruction_motion_completion_follower_audio", D["instruction_motion_completion_follower"]) if use_audio else D["instruction_motion_completion_follower"]
+        if use_motionscript:
+            instruction = instruction.rstrip() + D["instruction_suffix_input_motionscript"]
+        n = max(1, int(len(follower_tokens) * completion_split_ratio))
+        partial_tokens, rest_tokens = follower_tokens[:n], follower_tokens[n:]
+        partial_str = D["follower_motion_open"] + " " + " ".join(D["ih_token"].format(int(t)) for t in partial_tokens) + " " + D["follower_motion_close"]
+        input_body = build_input_body(motionscript_block=fmt_motionscript_input(*input_motionscript_roles()) if use_motionscript else None, audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], partial_str)])
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in rest_tokens) + " " + D["follower_motion_close"]
+
+    # --- MotionScript-focused tasks ---
+    elif task == "leader_motion_to_motionscript":
+        instruction = D["instruction_leader_motion_to_motionscript"]
+        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader())])
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+        target_text = "Leader: " + _ms_leader + " " + D["motionscript_close"]
+
+    elif task == "follower_motion_to_motionscript":
+        instruction = D["instruction_follower_motion_to_motionscript"]
+        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], fmt_follower())])
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+        target_text = "Follower: " + _ms_follower + " " + D["motionscript_close"]
+
+    elif task == "motionscript_to_leader_motion":
+        instruction = D["instruction_motionscript_to_leader_motion"]
+        ms_block = fmt_motionscript_input(*input_motionscript_roles())
+        input_body = build_input_body(motionscript_block=ms_block if ms_block else None, audio_block=fmt_audio() if use_audio else None)
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
+
+    elif task == "motionscript_to_follower_motion":
+        instruction = D["instruction_motionscript_to_follower_motion"]
+        ms_block = fmt_motionscript_input(*input_motionscript_roles())
+        input_body = build_input_body(motionscript_block=ms_block if ms_block else None, audio_block=fmt_audio() if use_audio else None)
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
+        target_text = " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
+
+    elif task == "caption_to_leader_motionscript":
+        instruction = D["instruction_caption_to_leader_motionscript"]
         if caption is None:
             caption_parts = []
             if level:
@@ -1227,41 +1513,129 @@ def build_prompt_interhuman_salsa(
                 caption_parts.append(f"Moves: {move_summary}")
             caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
         input_body = build_input_body(caption_txt=caption.strip(), audio_block=fmt_audio() if use_audio else None)
-        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
-        target_text = " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+        target_text = "Leader: " + _ms_leader + " " + D["motionscript_close"]
 
-    elif task == "leader_to_follower":
-        instruction = D.get("instruction_leader_to_follower_audio", D["instruction_leader_to_follower"]) if use_audio else D["instruction_leader_to_follower"]
-        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], fmt_leader())])
-        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
-        target_text = " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
+    elif task == "caption_to_follower_motionscript":
+        instruction = D["instruction_caption_to_follower_motionscript"]
+        if caption is None:
+            caption_parts = []
+            if level:
+                caption_parts.append(f"Level: {level}.")
+            move_summary = _format_move_summary_for_prompt(move_annotations or [])
+            if move_summary:
+                caption_parts.append(f"Moves: {move_summary}")
+            caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
+        input_body = build_input_body(caption_txt=caption.strip(), audio_block=fmt_audio() if use_audio else None)
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+        target_text = "Follower: " + _ms_follower + " " + D["motionscript_close"]
 
-    elif task == "follower_to_leader":
-        instruction = D.get("instruction_follower_to_leader_audio", D["instruction_follower_to_leader"]) if use_audio else D["instruction_follower_to_leader"]
-        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], fmt_follower())])
-        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
-        target_text = " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
+    elif task == "caption_to_both_motionscripts":
+        instruction = D["instruction_caption_to_both_motionscripts"]
+        if caption is None:
+            caption_parts = []
+            if level:
+                caption_parts.append(f"Level: {level}.")
+            move_summary = _format_move_summary_for_prompt(move_annotations or [])
+            if move_summary:
+                caption_parts.append(f"Moves: {move_summary}")
+            caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
+        input_body = build_input_body(caption_txt=caption.strip(), audio_block=fmt_audio() if use_audio else None)
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+        parts_out = []
+        if _ms_leader:
+            parts_out.append("Leader: " + _ms_leader)
+        if _ms_follower:
+            parts_out.append("Follower: " + _ms_follower)
+        target_text = "\n".join(parts_out) + " " + D["motionscript_close"]
 
-    elif task == "motion_completion_leader":
-        instruction = D.get("instruction_motion_completion_leader_audio", D["instruction_motion_completion_leader"]) if use_audio else D["instruction_motion_completion_leader"]
-        n = max(1, int(len(leader_tokens) * completion_split_ratio))
-        partial_tokens, rest_tokens = leader_tokens[:n], leader_tokens[n:]
-        partial_str = D["leader_motion_open"] + " " + " ".join(D["ih_token"].format(int(t)) for t in partial_tokens) + " " + D["leader_motion_close"]
-        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_leader_motion"], partial_str)])
-        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
-        target_text = " ".join(D["ih_token"].format(int(t)) for t in rest_tokens) + " " + D["leader_motion_close"]
+    elif task == "leader_motionscript_rel_to_follower_motionscript":
+        instruction = D["instruction_leader_motionscript_rel_to_follower_motionscript"]
+        input_body = build_input_body(motionscript_block=fmt_motionscript_input(True, False), relation_block=(D["label_relationship"], fmt_relationship()))
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+        target_text = "Follower: " + _ms_follower + " " + D["motionscript_close"]
 
-    elif task == "motion_completion_follower":
-        instruction = D.get("instruction_motion_completion_follower_audio", D["instruction_motion_completion_follower"]) if use_audio else D["instruction_motion_completion_follower"]
-        n = max(1, int(len(follower_tokens) * completion_split_ratio))
-        partial_tokens, rest_tokens = follower_tokens[:n], follower_tokens[n:]
-        partial_str = D["follower_motion_open"] + " " + " ".join(D["ih_token"].format(int(t)) for t in partial_tokens) + " " + D["follower_motion_close"]
-        input_body = build_input_body(audio_block=fmt_audio() if use_audio else None, motion_blocks=[(D["label_follower_motion"], partial_str)])
-        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
-        target_text = " ".join(D["ih_token"].format(int(t)) for t in rest_tokens) + " " + D["follower_motion_close"]
+    elif task == "follower_motionscript_rel_to_leader_motionscript":
+        instruction = D["instruction_follower_motionscript_rel_to_leader_motionscript"]
+        input_body = build_input_body(motionscript_block=fmt_motionscript_input(False, True), relation_block=(D["label_relationship"], fmt_relationship()))
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+        target_text = "Leader: " + _ms_leader + " " + D["motionscript_close"]
+
+    elif task == "motionscript_completion_leader":
+        instruction = D["instruction_motionscript_completion_leader"]
+        segments = [s.strip() for s in _ms_leader.split("-->")] if _ms_leader else []
+        n = max(1, int(len(segments) * completion_split_ratio)) if segments else 0
+        partial_script = " --> ".join(segments[:n]) if n else ""
+        rest_script = " --> ".join(segments[n:]) if n < len(segments) else ""
+        ms_block = "Leader: " + partial_script if partial_script else ""
+        input_body = build_input_body(motionscript_block=ms_block if ms_block else None)
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+        target_text = "Leader: " + rest_script + " " + D["motionscript_close"]
+
+    elif task == "motionscript_completion_follower":
+        instruction = D["instruction_motionscript_completion_follower"]
+        segments = [s.strip() for s in _ms_follower.split("-->")] if _ms_follower else []
+        n = max(1, int(len(segments) * completion_split_ratio)) if segments else 0
+        partial_script = " --> ".join(segments[:n]) if n else ""
+        rest_script = " --> ".join(segments[n:]) if n < len(segments) else ""
+        ms_block = "Follower: " + partial_script if partial_script else ""
+        input_body = build_input_body(motionscript_block=ms_block if ms_block else None)
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+        target_text = "Follower: " + rest_script + " " + D["motionscript_close"]
+
+    elif task == "caption_leader_motionscript_to_follower_motionscript":
+        instruction = D["instruction_caption_leader_motionscript_to_follower_motionscript"]
+        if caption is None:
+            caption_parts = []
+            if level:
+                caption_parts.append(f"Level: {level}.")
+            move_summary = _format_move_summary_for_prompt(move_annotations or [])
+            if move_summary:
+                caption_parts.append(f"Moves: {move_summary}")
+            caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
+        ms_block = fmt_motionscript_input(True, False)
+        input_body = build_input_body(caption_txt=caption.strip(), motionscript_block=ms_block if ms_block else None, audio_block=fmt_audio() if use_audio else None)
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+        target_text = "Follower: " + _ms_follower + " " + D["motionscript_close"]
+
+    elif task == "caption_follower_motionscript_to_leader_motionscript":
+        instruction = D["instruction_caption_follower_motionscript_to_leader_motionscript"]
+        if caption is None:
+            caption_parts = []
+            if level:
+                caption_parts.append(f"Level: {level}.")
+            move_summary = _format_move_summary_for_prompt(move_annotations or [])
+            if move_summary:
+                caption_parts.append(f"Moves: {move_summary}")
+            caption = " ".join(caption_parts) if caption_parts else "Salsa pair motion."
+        ms_block = fmt_motionscript_input(False, True)
+        input_body = build_input_body(caption_txt=caption.strip(), motionscript_block=ms_block if ms_block else None, audio_block=fmt_audio() if use_audio else None)
+        prompt_text = D["system_prompt"] + instruction + D["input_section"] + input_body + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+        target_text = "Leader: " + _ms_leader + " " + D["motionscript_close"]
 
     else:
         raise ValueError(f"Unknown task: {task}. Use one of: {INTERHUMAN_TASKS}")
 
-    return prompt_text, target_text
+    # Optional: for leader/follower-output tasks, response = MotionScript first (with role label), then newline, then motion tokens.
+    if output_motionscript_first and task in INTERHUMAN_TASK_OUTPUT_TYPE:
+        out_type = INTERHUMAN_TASK_OUTPUT_TYPE[task]
+        if out_type == "follower" and _ms_follower:
+            old_suffix = D["response_header"] + D["label_follower_motion"] + D["follower_motion_open"] + " "
+            if prompt_text.endswith(old_suffix):
+                prompt_text = prompt_text[: -len(old_suffix)] + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+            target_text = (
+                "Follower: " + _ms_follower + " " + D["motionscript_close"] + "\n\n"
+                + D["label_follower_motion"] + D["follower_motion_open"] + " "
+                + " ".join(D["ih_token"].format(int(t)) for t in follower_tokens) + " " + D["follower_motion_close"]
+            )
+        elif out_type == "leader" and _ms_leader:
+            old_suffix = D["response_header"] + D["label_leader_motion"] + D["leader_motion_open"] + " "
+            if prompt_text.endswith(old_suffix):
+                prompt_text = prompt_text[: -len(old_suffix)] + D["response_header"] + D["label_motionscript"] + D["motionscript_open"] + " "
+            target_text = (
+                "Leader: " + _ms_leader + " " + D["motionscript_close"] + "\n\n"
+                + D["label_leader_motion"] + D["leader_motion_open"] + " "
+                + " ".join(D["ih_token"].format(int(t)) for t in leader_tokens) + " " + D["leader_motion_close"]
+            )
 
+    return prompt_text, target_text
