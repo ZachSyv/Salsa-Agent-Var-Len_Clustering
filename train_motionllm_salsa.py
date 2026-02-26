@@ -116,6 +116,12 @@ def main():
     # Cache path: is_MDM=True -> lmdb_dir + cache_suffix + '_MDM' (no MotionScript); is_MDM=False -> + cache_suffix only (with MotionScript)
     # Default MDM (backward compat); pass --no-MDM to use non-MDM cache and train with MotionScript data
     args.is_MDM = not getattr(args, 'no_MDM', False)
+    # Token set: add MotionScript tokens only when training with MotionScript data (non-MDM); audio from --include-audio
+    args.include_motionscript = not args.is_MDM
+    if args.resume_ckpt and os.path.isfile(args.resume_ckpt):
+        ckpt_config = MotionLLM.load_config_from_checkpoint(args.resume_ckpt)
+        args.include_audio = ckpt_config.get('include_audio', args.include_audio)
+        args.include_motionscript = ckpt_config.get('include_motionscript', args.include_motionscript)
     lmdb_dir = getattr(args, 'lmdb_dir', 'dataset_processed_New/lmdb_Salsa_pair/lmdb_train')
     # n_poses, subdivision_stride, pose_resampling_fps align with demo.py and README cache creation
     n_poses, subdivision_stride, pose_resampling_fps = 100, 50, 20

@@ -1629,7 +1629,7 @@ class Salsa_Dataset(Dataset):
         n_poses: int,
         subdivision_stride: int,
         pose_resampling_fps: int,
-        cache_suffix: str = "_cache",
+        cache_suffix: str = "_salsa_dataset_cache",
         # data_mean: list[float],
         # data_std: list[float],
     ):

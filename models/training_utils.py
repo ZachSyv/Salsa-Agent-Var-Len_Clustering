@@ -528,7 +528,8 @@ def process_batch_Salsa(tokenizer, batch_aux_info, batch_ms_desc_L, batch_ms_des
                                     max_tgt_len, current_batch_task=None,
                                     motion_repr_type='humanml3d',
                                     batch_interhuman_data=None,
-                                    include_audio=False):
+                                    include_audio=False,
+                                    include_motionscript=True):
 
     batch_input_ids, batch_target_ids = [], []
     use_interhuman = (motion_repr_type == 'interhuman') and (batch_interhuman_data is not None)
@@ -596,10 +597,10 @@ def process_batch_Salsa(tokenizer, batch_aux_info, batch_ms_desc_L, batch_ms_des
             ms_follower_str = _ms_str(ms_des_F)
             has_ms_data = bool(ms_leader_str or ms_follower_str)
             if batch_interhuman_task in INTERHUMAN_TASKS_NO_MS:
-                use_motionscript = batch_include_ms and has_ms_data
+                use_motionscript = include_motionscript and batch_include_ms and has_ms_data
                 output_motionscript_first = batch_output_ms_first if use_motionscript else False
             else:
-                use_motionscript = has_ms_data
+                use_motionscript = include_motionscript and has_ms_data
                 output_motionscript_first = False
 
             task = batch_interhuman_task if (batch_interhuman_task and batch_interhuman_task in INTERHUMAN_TASKS) else random.choice(allowed_ih_tasks)

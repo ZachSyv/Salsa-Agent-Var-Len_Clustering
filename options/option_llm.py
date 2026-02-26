@@ -14,6 +14,7 @@ def get_args_parser():
                         help='humanml3d: HumanML3D + <Motion_i>; interhuman: InterHuman/Rel + <IH_i>, <Rel_i>')
     parser.add_argument('--nb-ih-code', type=int, default=512, help='InterHuman codebook size (if motion-repr-type=interhuman)')
     parser.add_argument('--nb-rel-code', type=int, default=512, help='Relationship codebook size (if motion-repr-type=interhuman)')
+    parser.add_argument('--include-motionscript', action='store_true', help='Add MotionScript tokens; set from non-MDM when training.')
     parser.add_argument('--include-audio', action='store_true', help='Add audio tokens (<Audio_0>..) to tokenizer for training with audio modality')
 
     ## LLM 

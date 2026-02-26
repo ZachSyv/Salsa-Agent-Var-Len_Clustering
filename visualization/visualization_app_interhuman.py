@@ -4079,6 +4079,12 @@ def create_interface():
                         value="Leader + Rel to Follower"
                     )
                     llm_include_audio = gr.Checkbox(label="Include audio", value=False)
+                    llm_include_motionscript = gr.Checkbox(label="Include MotionScript", value=False)
+                    llm_output_motionscript_first = gr.Checkbox(
+                        label="Output MotionScript first",
+                        value=False,
+                        info="For leader/follower tasks: predict MotionScript then motion (only when MotionScript is included)."
+                    )
                 use_mesh_llm = gr.Checkbox(
                     label="Also produce mesh visualization (2-person SMPL)",
                     value=False,
@@ -4335,7 +4341,7 @@ def create_interface():
         )
 
         # LLM-Inference tab handler (tab UI must be added above Legacy tab)
-        def on_llm_inference(idx_val, task_choice, include_audio_val, use_mesh_val, ckpt_path):
+        def on_llm_inference(idx_val, task_choice, include_audio_val, include_motionscript_val, output_motionscript_first_val, use_mesh_val, ckpt_path):
             try:
                 from models.training_utils import (
                     build_prompt_interhuman_salsa,
@@ -4395,6 +4401,20 @@ def create_interface():
                     ms_F = " --> ".join(str(x) for x in ms_F) if (isinstance(ms_F, (list, tuple)) and ms_F) else ""
                 ms_L = (ms_L or "").strip() if isinstance(ms_L, str) else ""
                 ms_F = (ms_F or "").strip() if isinstance(ms_F, str) else ""
+                args = get_args_parser()
+                args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                args.motion_repr_type = "interhuman"
+                if not ckpt_path or not os.path.isfile(ckpt_path):
+                    return "", "", "", None, None, None, None, f"Checkpoint not found: {ckpt_path}"
+                ckpt_config = MotionLLM.load_config_from_checkpoint(ckpt_path)
+                args.include_audio = ckpt_config.get("include_audio", False)
+                args.include_motionscript = ckpt_config.get("include_motionscript", False)
+                model = MotionLLM(args)
+                model.load_model(ckpt_path)
+                model.llm.eval()
+                # Build prompt only with modalities the model was trained with (from checkpoint)
+                include_ms = bool(include_motionscript_val) and bool(ms_L or ms_F) and model.include_motionscript
+                effective_include_audio = bool(include_audio_val) and model.include_audio
                 prompt_text, gt_target_text = build_prompt_interhuman_salsa(
                     leader_tokens=leader_tokens,
                     follower_tokens=follower_tokens,
@@ -4404,20 +4424,12 @@ def create_interface():
                     level=level,
                     caption=caption,
                     audio_tokens=audio_tokens,
-                    include_audio=bool(include_audio_val),
-                    include_motionscript=bool(ms_L or ms_F),
-                    motionscript_leader=ms_L or None,
-                    motionscript_follower=ms_F or None,
+                    include_audio=effective_include_audio,
+                    include_motionscript=include_ms,
+                    motionscript_leader=(ms_L or None) if include_ms else None,
+                    motionscript_follower=(ms_F or None) if include_ms else None,
+                    output_motionscript_first=bool(output_motionscript_first_val),
                 )
-                args = get_args_parser()
-                args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                args.motion_repr_type = "interhuman"
-                args.include_audio = bool(include_audio_val)
-                if not ckpt_path or not os.path.isfile(ckpt_path):
-                    return prompt_text, gt_target_text, "", None, None, None, None, f"Checkpoint not found: {ckpt_path}"
-                model = MotionLLM(args)
-                model.load_model(ckpt_path)
-                model.llm.eval()
                 pred_dict = model.generate_Payam_interhuman(prompt_text, task_key, max_new_tokens=150)
                 D = INTERHUMAN_PROMPT_DELIMITERS
                 out_type = INTERHUMAN_TASK_OUTPUT_TYPE.get(task_key, "follower")
@@ -4457,7 +4469,7 @@ def create_interface():
 
         llm_run_btn.click(
             fn=on_llm_inference,
-            inputs=[sample_idx, llm_task, llm_include_audio, use_mesh_llm, llm_ckpt],
+            inputs=[sample_idx, llm_task, llm_include_audio, llm_include_motionscript, llm_output_motionscript_first, use_mesh_llm, llm_ckpt],
             outputs=[llm_prompt_text, llm_gt_target, llm_pred_target, llm_pred_video, llm_gt_video, llm_pred_mesh_video, llm_gt_mesh_video, llm_info]
         )
         
@@ -5453,6 +5465,16 @@ def create_interface():
         
         legacy_btn.click(
             fn=on_legacy_visualize,
+            inputs=[sample_idx, show_leader, show_follower, show_combined],
+            outputs=[legacy_leader_video, legacy_follower_video, legacy_combined_video, legacy_info]
+        )
+    
+    return demo
+
+
+if __name__ == "__main__":
+    demo = create_interface()
+    demo.launch(share=False, server_name="0.0.0.0", server_port=7862)on_legacy_visualize,
             inputs=[sample_idx, show_leader, show_follower, show_combined],
             outputs=[legacy_leader_video, legacy_follower_video, legacy_combined_video, legacy_info]
         )

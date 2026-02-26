@@ -45,6 +45,7 @@ class MotionLLM(nn.Module):
         self.load_motionvq()  # HumanML3D VQVAE; used for humanml3d path and baseline caption/generate
         self.motion_repr_type = getattr(args, 'motion_repr_type', 'humanml3d')  # 'humanml3d' | 'interhuman'
         self.include_audio = getattr(args, 'include_audio', False)  # if True, add <Audio_0>.. tokens
+        self.include_motionscript = getattr(args, 'include_motionscript', False)  # if True, add MotionScript-related tokens
 
         # -------------------------------------------------------------------------
         # Baseline: HumanML3D-style tokens only (Motion, </Motion>, <Motion_i>)
@@ -67,11 +68,11 @@ class MotionLLM(nn.Module):
             for i in range(self.args.nb_code):
                 self.tokenizer.add_tokens([f'<Motion_{i}>'])
             humanml3d_special_tokens = [
-                "<LeaderScript>", "</LeaderScript>",
-                "<FollowerScript>", "</FollowerScript>",
                 "<LeaderMotion>", "</LeaderMotion>",
                 "<FollowerMotion>", "</FollowerMotion>",
             ]
+            if self.include_motionscript:
+                humanml3d_special_tokens += ["<LeaderScript>", "</LeaderScript>", "<FollowerScript>", "</FollowerScript>"]
             if self.include_audio:
                 humanml3d_special_tokens += ["<AudioTokens>", "</AudioTokens>"] + [f"<Audio_{i}>" for i in range(4096)]
             self.tokenizer.add_tokens(humanml3d_special_tokens)
@@ -88,8 +89,14 @@ class MotionLLM(nn.Module):
         # InterHuman: use INTERHUMAN_SPECIAL_TOKENS from training_utils + IH/Rel + optional Audio
         # -------------------------------------------------------------------------
         elif self.motion_repr_type == 'interhuman':
-            from models.training_utils import INTERHUMAN_SPECIAL_TOKENS
-            interhuman_tokens = list(INTERHUMAN_SPECIAL_TOKENS)
+            # Base tokens (motion/relationship); MotionScript tokens only when trained with MotionScript (non-MDM)
+            interhuman_tokens = [
+                "<LeaderMotion>", "</LeaderMotion>",
+                "<FollowerMotion>", "</FollowerMotion>",
+                "<Relationship>", "</Relationship>",
+            ]
+            if self.include_motionscript:
+                interhuman_tokens += ["<MotionScript>", "</MotionScript>"]
             nb_ih = getattr(self.args, 'nb_ih_code', 512)
             nb_rel = getattr(self.args, 'nb_rel_code', 512)
             interhuman_tokens += [f"<IH_{i}>" for i in range(nb_ih)] + [f"<Rel_{i}>" for i in range(nb_rel)]
@@ -160,6 +167,7 @@ class MotionLLM(nn.Module):
             motion_repr_type=self.motion_repr_type,
             batch_interhuman_data=batch_interhuman_data,
             include_audio=getattr(self.args, 'include_audio', False),
+            include_motionscript=getattr(self.args, 'include_motionscript', True),
         )
 
 
@@ -356,8 +364,20 @@ class MotionLLM(nn.Module):
         # save the lm_head of the additional tokens
         lm_head = self.llm.lm_head.weight[self.nb_text_tokens:]
         save_dict['lm_head'] = lm_head
+        # save token-set config so inference can build model with same tokens
+        save_dict['include_audio'] = self.include_audio
+        save_dict['include_motionscript'] = self.include_motionscript
 
         torch.save(save_dict, path)
+
+    @staticmethod
+    def load_config_from_checkpoint(path):
+        """Load only the token-set config from a checkpoint (for building model before load_model)."""
+        save_dict = torch.load(path, map_location='cpu')
+        return {
+            'include_audio': save_dict.get('include_audio', False),
+            'include_motionscript': save_dict.get('include_motionscript', False),
+        }
 
     def load_model(self, path):
         print(f"Loading model from {path}")
