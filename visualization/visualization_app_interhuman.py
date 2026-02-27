@@ -5474,14 +5474,4 @@ def create_interface():
 
 if __name__ == "__main__":
     demo = create_interface()
-    demo.launch(share=False, server_name="0.0.0.0", server_port=7862)on_legacy_visualize,
-            inputs=[sample_idx, show_leader, show_follower, show_combined],
-            outputs=[legacy_leader_video, legacy_follower_video, legacy_combined_video, legacy_info]
-        )
-    
-    return demo
-
-
-if __name__ == "__main__":
-    demo = create_interface()
     demo.launch(share=False, server_name="0.0.0.0", server_port=7862)
