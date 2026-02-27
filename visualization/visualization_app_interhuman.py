@@ -1356,11 +1356,14 @@ class InterHumanVisualizationApp:
         relationship_tokens_override=None,
         output_suffix: str = "",
         use_mesh: bool = False,
+        return_keypoints_only: bool = False,
     ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[object], Optional[str], str]:
         """Visualize motion reconstructed from InterHuman and Relationship tokens.
         Optional overrides: pass list/array of tokens to use instead of sample's (e.g. LLM-predicted tokens).
         output_suffix: appended to temp filenames (e.g. '_pred', '_gt') so multiple calls don't overwrite.
         use_mesh: when True, also render a 2-person SMPL mesh video from reconstructed joints.
+        return_keypoints_only: when True, returns (leader_kp, follower_kp, info) as first three elements
+          (leader_kp/follower_kp are (T, 22, 3) numpy arrays; remaining three return values are None).
         """
         if self.dataset is None:
             return None, None, None, None, None, "Error: No dataset loaded"
@@ -1776,6 +1779,12 @@ class InterHumanVisualizationApp:
 
             follower_recon_aligned_keypoints = follower_recon_aligned_motion[:, :n_joints*3].reshape(-1, n_joints, 3)
             
+            if return_keypoints_only:
+                info_short = f"Reconstructed {leader_recon_keypoints.shape[0]} frames (idx={idx}, {num_windows} windows)."
+                return (np.asarray(leader_recon_keypoints, dtype=np.float32),
+                        np.asarray(follower_recon_aligned_keypoints, dtype=np.float32),
+                        info_short, None, None, None)
+            
             vid_id = sample.get('aux_info', {}).get('vid', f'sample_{idx}')
             
             # Create videos (output_suffix avoids overwriting when e.g. LLM-Inference calls pred then GT)
@@ -1961,6 +1970,37 @@ class InterHumanVisualizationApp:
             import traceback
             return None, None, None, None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
     
+    def get_reconstructed_keypoints(
+        self,
+        idx: int,
+        use_continuous_concatenation: bool = True,
+        use_actual_relation: bool = True,
+        leader_tokens_override=None,
+        follower_tokens_override=None,
+        relationship_tokens_override=None,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
+        """Get (leader_kp, follower_kp) as (T, 22, 3) numpy arrays from token reconstruction.
+        Optional overrides for LLM-predicted tokens. Returns (leader_kp, follower_kp, info_str);
+        on error returns (None, None, error_msg).
+        """
+        result = self.visualize_reconstruction_from_tokens(
+            idx,
+            use_continuous_concatenation=use_continuous_concatenation,
+            use_actual_relation=use_actual_relation,
+            leader_tokens_override=leader_tokens_override,
+            follower_tokens_override=follower_tokens_override,
+            relationship_tokens_override=relationship_tokens_override,
+            output_suffix="_kp",
+            use_mesh=False,
+            return_keypoints_only=True,
+        )
+        # result is (leader_kp, follower_kp, info, None, None, None) when return_keypoints_only was True
+        if len(result) >= 6 and result[3] is None and result[0] is not None and hasattr(result[0], "shape"):
+            return result[0], result[1], result[2] or ""
+        if len(result) >= 6 and isinstance(result[5], str) and result[5]:
+            return None, None, result[5]
+        return None, None, "Unknown error from reconstruction"
+    
     def visualize_legacy_format(self, idx: int, show_leader: bool, show_follower: bool, show_combined: bool) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
         """Visualize legacy HumanML3D format (for comparison)."""
         if self.dataset is None:
@@ -2015,6 +2055,12 @@ class InterHumanVisualizationApp:
             relative_transform_recon = np.array([angle_half_recon, rel_recon_x, rel_recon_z_pos])
             follower_recon_aligned_motion = rigid_transform(relative_transform_recon, follower_recon_denorm.copy())
             follower_recon_aligned_keypoints = follower_recon_aligned_motion[:, :n_joints*3].reshape(-1, n_joints, 3)
+            
+            if return_keypoints_only:
+                info_short = f"Reconstructed {leader_recon_keypoints.shape[0]} frames (idx={idx}, {num_windows} windows)."
+                return (np.asarray(leader_recon_keypoints, dtype=np.float32),
+                        np.asarray(follower_recon_aligned_keypoints, dtype=np.float32),
+                        info_short, None, None, None)
             
             vid_id = sample.get('aux_info', {}).get('vid', f'sample_{idx}')
             
