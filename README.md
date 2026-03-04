@@ -195,13 +195,12 @@ Use HumanML3D-style data and Motion-Agent–like hyperparameters (e.g. `--lr 1e-
 | **InterHuman + wandb** | `python train_motionllm_salsa.py --motion-repr-type interhuman --task none --lr 1e-5 --epochs 500 --train-batch-size 4 --save-every 5 --save-dir output_trained/stage1_interhuman --use-wandb --wandb-project Salsa-LLM --wandb-run-name stage1_interhuman` |
 
 **Stage 2 (task-specific)**  
-Resume from a stage-1 (or pretrained) checkpoint and fine-tune on one task:
+Resume from a stage-1 (or pretrained) checkpoint and fine-tune on a single task (e.g. `leader_rel_to_follower`). Use a checkpoint that matches the modality you want (no MotionScript = MDM; with MotionScript = non-MDM).
 
-```bash
-python train_motionllm_salsa.py --task leader_to_follower --resume-ckpt output_trained/stage1_humanml3d/Xmotionllm_epoch500.pth --lr 1e-5 --epochs 50 --save-dir output_trained/leader_to_follower
-```
-
-Optional: `--use-wandb` to log to Weights & Biases.
+| Setting | Command |
+|--------|--------|
+| **Leader + Rel→Follower from Stage 1 (no MotionScript)** | `python train_motionllm_salsa.py --motion-repr-type interhuman --task leader_rel_to_follower --resume-ckpt output_trained/stage1_interhuman_mdm/Xmotionllm_epoch500.pth --lr 1e-5 --epochs 50 --save-every 10 --save-dir output_trained/leader_rel_to_follower_mdm --use-wandb --wandb-project Salsa-LLM --wandb-run-name leader_rel_to_follower_mdm` |
+| **Leader + Rel→Follower from Stage 1 (with MotionScript)** | `python train_motionllm_salsa.py --motion-repr-type interhuman --no-MDM --task leader_rel_to_follower --resume-ckpt output_trained/stage1_interhuman_motionscript/Xmotionllm_epoch500.pth --lr 1e-5 --epochs 50 --save-every 10 --save-dir output_trained/leader_rel_to_follower_motionscript --use-wandb --wandb-project Salsa-LLM --wandb-run-name leader_rel_to_follower_motionscript` |
 
 ---
 
