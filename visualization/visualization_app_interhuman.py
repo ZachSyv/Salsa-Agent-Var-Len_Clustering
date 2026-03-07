@@ -214,9 +214,14 @@ def concatenate_windows_with_continuity(
         f"x={first_relationship_x:.3f}, z={first_relationship_z:.3f}"
     )
     
-    # Track last frame of previous window to determine new world origin
-    prev_window_last_frame = transformed_leader_windows[-1][-1]  # (262,)
-    new_world_origin_pos, new_world_origin_yaw_half, _ = extract_root_pos_yaw(prev_window_last_frame)
+    # Track last frame of previous window to determine new world origin.
+    # Extrapolate ONE step beyond the last frame to account for the missing transition
+    # frame at each window boundary (20 raw frames → 19 IH frames loses one frame).
+    _w0 = transformed_leader_windows[-1]
+    _pos_last, _yaw_last, _ = extract_root_pos_yaw(_w0[-1])
+    _pos_prev, _yaw_prev, _ = extract_root_pos_yaw(_w0[-2])
+    new_world_origin_pos = _pos_last + (_pos_last - _pos_prev)
+    new_world_origin_yaw_half = _yaw_last + (_yaw_last - _yaw_prev)
     
     for w in range(1, len(leader_windows)):
         # Get first frame of current window (in canonical frame, starts from origin)
@@ -330,8 +335,12 @@ def concatenate_windows_with_continuity(
         debug_log(f"Follower should be at: leader_root + relationship_offset (in world space)")
         debug_log(f"  Expected relationship offset in world space: x={relationship_x:.3f}, z={relationship_z:.3f} (needs rotation)")
         
-        # Update new world origin for next iteration (from last frame of current transformed window)
-        new_world_origin_pos, new_world_origin_yaw_half, _ = extract_root_pos_yaw(leader_transformed[-1])
+        # Update new world origin for next iteration – extrapolate one step ahead
+        # to account for the missing transition frame between consecutive windows.
+        _pos_last, _yaw_last, _ = extract_root_pos_yaw(leader_transformed[-1])
+        _pos_prev, _yaw_prev, _ = extract_root_pos_yaw(leader_transformed[-2])
+        new_world_origin_pos = _pos_last + (_pos_last - _pos_prev)
+        new_world_origin_yaw_half = _yaw_last + (_yaw_last - _yaw_prev)
         debug_log(f"Updated world origin for next window: pos={new_world_origin_pos}, yaw_half={np.degrees(new_world_origin_yaw_half):.2f}°")
         
         # Check continuity at boundary
@@ -373,10 +382,21 @@ def concatenate_windows_with_continuity(
             debug_log(f"  Relationship mismatch:")
             debug_log(f"    angle_diff={np.degrees((actual_rel_yaw/2) - relationship_angle_half):.2f}°, x_diff={actual_rel_at_boundary_xz[0] - relationship_x:.3f}, z_diff={actual_rel_at_boundary_xz[1] - relationship_z:.3f}")
     
-    # Concatenate all windows
-    leader_continuous = np.concatenate(transformed_leader_windows, axis=0)
-    follower_continuous = np.concatenate(transformed_follower_windows, axis=0)
-    relationship_continuous = np.concatenate(transformed_relationship_windows, axis=0)
+    # Concatenate all windows, inserting one linearly-interpolated frame at each boundary
+    # to compensate for the raw frame lost in the 20-frame → 19-frame IH conversion.
+    all_leader = [transformed_leader_windows[0]]
+    all_follower = [transformed_follower_windows[0]]
+    all_rel = [transformed_relationship_windows[0]]
+    for w in range(1, len(transformed_leader_windows)):
+        interp_L = (transformed_leader_windows[w - 1][-1:] + transformed_leader_windows[w][:1]) * 0.5
+        interp_F = (transformed_follower_windows[w - 1][-1:] + transformed_follower_windows[w][:1]) * 0.5
+        interp_R = (transformed_relationship_windows[w - 1][-1:] + transformed_relationship_windows[w][:1]) * 0.5
+        all_leader.extend([interp_L, transformed_leader_windows[w]])
+        all_follower.extend([interp_F, transformed_follower_windows[w]])
+        all_rel.extend([interp_R, transformed_relationship_windows[w]])
+    leader_continuous = np.concatenate(all_leader, axis=0)
+    follower_continuous = np.concatenate(all_follower, axis=0)
+    relationship_continuous = np.concatenate(all_rel, axis=0)
     
     debug_log(f"\n--- Final Summary ---")
     debug_log(f"Total frames: {len(leader_continuous)}")
@@ -2003,6 +2023,82 @@ class InterHumanVisualizationApp:
         if len(result) >= 6 and isinstance(result[5], str) and result[5]:
             return None, None, result[5]
         return None, None, "Unknown error from reconstruction"
+
+    def get_actual_gt_keypoints(
+        self,
+        idx: int,
+        use_continuous_concatenation: bool = True,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
+        """Get actual GT keypoints from InterHuman data cache (no VQ-VAE reconstruction).
+        Returns (leader_kp, follower_kp, info) with (T, 22, 3) arrays; on error (None, None, error_msg)."""
+        if not INTERHUMAN_AVAILABLE:
+            return None, None, "InterHuman visualization dependencies not available"
+        if self.dataset is None:
+            return None, None, "No dataset loaded"
+        try:
+            sample = self._get_sample_from_dataset(idx)
+            interhuman_data = sample.get('interhuman_data')
+            if interhuman_data is None:
+                return None, None, "No InterHuman data in sample"
+            leader_motion_ih = np.array(interhuman_data['leader_motion_ih'], dtype=np.float32)
+            follower_motion_ih = np.array(interhuman_data['follower_motion_ih'], dtype=np.float32)
+            relationship_features = np.array(interhuman_data['relationship_features'], dtype=np.float32)
+            leader_tokens_array = np.array(interhuman_data['leader_tokens'])
+            num_tokens = len(leader_tokens_array)
+            seq_len = len(leader_motion_ih)
+            root_quat_L = np.array(interhuman_data['root_quat_init_L'], dtype=np.float32)
+            root_pos_L = np.array(interhuman_data['root_pos_init_L'], dtype=np.float32)
+            root_quat_F = np.array(interhuman_data['root_quat_init_F'], dtype=np.float32)
+            root_pos_F = np.array(interhuman_data['root_pos_init_F'], dtype=np.float32)
+            if use_continuous_concatenation and num_tokens > 1:
+                window_size_after_processing = 19
+                leader_windows, follower_windows, relationship_windows = [], [], []
+                root_quat_inits_L, root_pos_inits_L = [], []
+                root_quat_inits_F, root_pos_inits_F = [], []
+                for w in range(num_tokens):
+                    window_start = w * window_size_after_processing
+                    window_end = min(window_start + window_size_after_processing, seq_len)
+                    leader_windows.append(leader_motion_ih[window_start:window_end])
+                    follower_windows.append(follower_motion_ih[window_start:window_end])
+                    relationship_windows.append(relationship_features[window_start:window_end])
+                    if w == 0:
+                        root_quat_inits_L.append(root_quat_L)
+                        root_pos_inits_L.append(root_pos_L)
+                        root_quat_inits_F.append(root_quat_F)
+                        root_pos_inits_F.append(root_pos_F)
+                    else:
+                        root_quat_inits_L.append(np.array([1, 0, 0, 0], dtype=np.float32))
+                        root_pos_inits_L.append(np.zeros(3, dtype=np.float32))
+                        root_quat_inits_F.append(np.array([1, 0, 0, 0], dtype=np.float32))
+                        root_pos_inits_F.append(np.zeros(3, dtype=np.float32))
+                leader_motion_ih, follower_motion_ih, relationship_features = concatenate_windows_with_continuity(
+                    leader_windows, follower_windows, relationship_windows,
+                    root_quat_inits_L, root_pos_inits_L, root_quat_inits_F, root_pos_inits_F,
+                )
+            n_joints = 22
+            leader_motion_ih_array = np.asarray(leader_motion_ih, dtype=np.float32)
+            follower_motion_ih_array = np.asarray(follower_motion_ih, dtype=np.float32)
+            if leader_motion_ih_array.ndim != 2 or leader_motion_ih_array.shape[1] < n_joints * 3:
+                return None, None, f"Leader motion wrong shape: {leader_motion_ih_array.shape}"
+            if follower_motion_ih_array.ndim != 2 or follower_motion_ih_array.shape[1] < n_joints * 3:
+                return None, None, f"Follower motion wrong shape: {follower_motion_ih_array.shape}"
+            leader_keypoints = leader_motion_ih_array[:, : n_joints * 3].reshape(-1, n_joints, 3).astype(np.float32)
+            relationship_features_array = np.asarray(relationship_features, dtype=np.float32)
+            rel_w = float(relationship_features_array[0, 0])
+            rel_z = float(relationship_features_array[0, 1])
+            rel_x = float(relationship_features_array[0, 2])
+            angle_half = np.arctan2(rel_z, rel_w)
+            relative_transform = np.array([angle_half, rel_x, relationship_features_array[0, 3]], dtype=np.float32)
+            if use_continuous_concatenation and num_tokens > 1:
+                follower_aligned_motion = follower_motion_ih_array
+            else:
+                follower_aligned_motion = rigid_transform(relative_transform, follower_motion_ih_array.copy())
+            follower_aligned_keypoints = follower_aligned_motion[:, : n_joints * 3].reshape(-1, n_joints, 3).astype(np.float32)
+            vid_id = sample.get('aux_info', {}).get('vid', f'sample_{idx}')
+            return leader_keypoints, follower_aligned_keypoints, vid_id
+        except Exception as e:
+            import traceback
+            return None, None, f"{e}\n{traceback.format_exc()}"
 
     def get_reconstructed_keypoints_and_motion(
         self,
