@@ -1371,6 +1371,9 @@ class InterHumanVisualizationApp:
         idx: int,
         use_continuous_concatenation: bool = False,
         use_actual_relation: bool = False,
+        use_canonical_seed: bool = False,
+        smooth_boundaries: bool = False,
+        smooth_boundary_half_kernel: int = 4,
         leader_tokens_override=None,
         follower_tokens_override=None,
         relationship_tokens_override=None,
@@ -1506,6 +1509,12 @@ class InterHumanVisualizationApp:
                 root_quat = qbetween_np(forward.reshape(1, -1), target.reshape(1, -1))[0]
                 yaw_half = np.arctan2(root_quat[2], root_quat[0])
                 return root_pos, yaw_half, root_quat
+
+            def canonicalize_frame(frame_1xD):
+                """Move root to XZ=0, yaw=0 (canonical). Keeps root Y and body pose."""
+                pos, yaw_half, _ = extract_root_pos_yaw(frame_1xD[0])
+                inv_transform = np.array([-yaw_half, -pos[0], -pos[2]], dtype=np.float32)
+                return rigid_transform(inv_transform, frame_1xD.copy())
 
             # Helper: compute relationship features from world-space leader/follower frames
             def compute_actual_relationship_from_world(leader_frame, follower_frame):
@@ -1652,9 +1661,16 @@ class InterHumanVisualizationApp:
                     follower_recon_windows.append(follower_recon_denorm_window)
                     relationship_recon_windows.append(rel_recon_denorm_window)
 
-                    # Update conditioning for next window with last reconstructed frame (denormalized)
-                    leader_prev_last = leader_recon_denorm_window[-1:]
-                    follower_prev_last = follower_recon_denorm_window[-1:]
+                    # Update conditioning for next window with last reconstructed frame (denormalized).
+                    # If use_canonical_seed: canonicalize the frame (root → origin, yaw → 0) so the
+                    # decoder receives a frame matching its training distribution, reducing backward-motion
+                    # artifacts caused by non-canonical conditioning at window boundaries.
+                    if use_canonical_seed:
+                        leader_prev_last = canonicalize_frame(leader_recon_denorm_window[-1:])
+                        follower_prev_last = canonicalize_frame(follower_recon_denorm_window[-1:])
+                    else:
+                        leader_prev_last = leader_recon_denorm_window[-1:]
+                        follower_prev_last = follower_recon_denorm_window[-1:]
                     
                     # Optionally compute actual relation from world-space aligned motions
                     if use_actual_relation:
@@ -1671,7 +1687,11 @@ class InterHumanVisualizationApp:
                             leader_world = leader_recon_denorm_window.copy()
                             follower_world = rigid_transform(rel_transform, follower_recon_denorm_window.copy())
                             
-                            world_origin_pos, world_origin_yaw_half, _ = extract_root_pos_yaw(leader_world[-1])
+                            # Extrapolate world origin (same logic as concatenate_windows_with_continuity)
+                            _pos_last, _yaw_last, _ = extract_root_pos_yaw(leader_world[-1])
+                            _pos_prev, _yaw_prev, _ = extract_root_pos_yaw(leader_world[-2])
+                            world_origin_pos = _pos_last + (_pos_last - _pos_prev)
+                            world_origin_yaw_half = _yaw_last + (_yaw_last - _yaw_prev)
                         else:
                             window_pos_offset_xz = world_origin_pos[[0, 2]] - curr_leader_first_pos[[0, 2]]
                             window_yaw_offset_half = world_origin_yaw_half - curr_leader_first_yaw_half
@@ -1687,10 +1707,18 @@ class InterHumanVisualizationApp:
                             follower_aligned = rigid_transform(rel_transform, follower_recon_denorm_window.copy())
                             follower_world = rigid_transform(window_transform, follower_aligned.copy())
                             
-                            world_origin_pos, world_origin_yaw_half, _ = extract_root_pos_yaw(leader_world[-1])
+                            # Extrapolate world origin (same logic as concatenate_windows_with_continuity)
+                            _pos_last, _yaw_last, _ = extract_root_pos_yaw(leader_world[-1])
+                            _pos_prev, _yaw_prev, _ = extract_root_pos_yaw(leader_world[-2])
+                            world_origin_pos = _pos_last + (_pos_last - _pos_prev)
+                            world_origin_yaw_half = _yaw_last + (_yaw_last - _yaw_prev)
                         
+                        # Compute relationship from extrapolated positions so it is consistent
+                        # with the extrapolated world origin used by concatenate_windows_with_continuity.
+                        _leader_extrap = leader_world[-1] + (leader_world[-1] - leader_world[-2])
+                        _follower_extrap = follower_world[-1] + (follower_world[-1] - follower_world[-2])
                         actual_rel_last = compute_actual_relationship_from_world(
-                            leader_world[-1], follower_world[-1]
+                            _leader_extrap, _follower_extrap
                         )
                         rel_prev_last = actual_rel_last[None, :]
                         if DEBUG:
@@ -1705,13 +1733,38 @@ class InterHumanVisualizationApp:
             follower_recon_denorm = np.concatenate(follower_recon_windows, axis=0)
             rel_recon_denorm = np.concatenate(relationship_recon_windows, axis=0)
             
-            # Note: leader_recon_denorm, follower_recon_denorm, and rel_recon_denorm are already set above
-            
             # Apply continuous concatenation to reconstructed outputs if requested
             if use_continuous_concatenation and num_tokens > 1:
                 leader_recon_denorm, follower_recon_denorm, rel_recon_denorm = concatenate_windows_with_continuity(
                     leader_recon_windows, follower_recon_windows, relationship_recon_windows
                 )
+            
+            # Gaussian smoothing around each window boundary to reduce visible jumps.
+            # Boundaries are at every window_size_after_processing frames; with continuous
+            # concatenation an extra interpolated frame shifts each boundary by one.
+            if smooth_boundaries and num_windows > 1:
+                try:
+                    from scipy.ndimage import gaussian_filter1d
+                    hk = max(1, int(smooth_boundary_half_kernel))
+                    sigma = hk / 2.0
+                    stride = window_size_after_processing
+                    if use_continuous_concatenation:
+                        # Each window contributes stride frames + 1 interpolated = stride+1 frames total
+                        # (except window 0 which contributes just stride frames)
+                        # Seam (interpolated) frame positions: stride, stride+(stride+1), ...
+                        boundary_frames = [stride + (stride + 1) * k for k in range(num_windows - 1)]
+                    else:
+                        boundary_frames = [stride * k for k in range(1, num_windows)]
+                    T = len(leader_recon_denorm)
+                    for bidx in boundary_frames:
+                        s = max(0, bidx - hk)
+                        e = min(T, bidx + hk + 1)
+                        if e > s:
+                            leader_recon_denorm[s:e] = gaussian_filter1d(leader_recon_denorm[s:e], sigma=sigma, axis=0)
+                            follower_recon_denorm[s:e] = gaussian_filter1d(follower_recon_denorm[s:e], sigma=sigma, axis=0)
+                            rel_recon_denorm[s:e] = gaussian_filter1d(rel_recon_denorm[s:e], sigma=sigma, axis=0)
+                except ImportError:
+                    print("scipy not available; boundary smoothing skipped.")
             
             if DEBUG:
                 for boundary_idx in range(1, num_windows):
@@ -3921,6 +3974,22 @@ def create_interface():
                     value=False,
                     info="Compute relationship input for the next window from the last reconstructed leader/follower frame (world space)."
                 )
+                use_canonical_seed = gr.Checkbox(
+                    label="Canonicalize boundary seed frame",
+                    value=False,
+                    info="Before passing the last frame of window W as conditioning for window W+1's decoder, move it to canonical (root → origin, yaw → 0). Reduces backward-motion artifacts at window boundaries."
+                )
+                with gr.Row():
+                    smooth_boundaries = gr.Checkbox(
+                        label="Smooth window boundaries",
+                        value=False,
+                        info="Apply a Gaussian filter over a small neighbourhood of frames around each window boundary to reduce visible jumps."
+                    )
+                    smooth_boundary_half_kernel = gr.Slider(
+                        minimum=1, maximum=10, step=1, value=4,
+                        label="Smoothing half-kernel (frames each side)",
+                        info="Number of frames on each side of each boundary to include in the smoothing window."
+                    )
                 use_mesh_recon = gr.Checkbox(
                     label="Also produce mesh visualization (2-person SMPL)",
                     value=False,
@@ -4336,16 +4405,22 @@ def create_interface():
                 import traceback
                 return None, None, None, None, f"Error: {str(e)}\n{traceback.format_exc()}"
         
-        def on_reconstruct(idx_val, use_continuous_val, use_actual_relation_val, use_mesh_val):
+        def on_reconstruct(idx_val, use_continuous_val, use_actual_relation_val, use_canonical_seed_val, smooth_val, smooth_kernel_val, use_mesh_val):
             try:
                 idx = int(idx_val) if idx_val is not None else 0
                 use_continuous = bool(use_continuous_val) if use_continuous_val is not None else False
                 use_actual = bool(use_actual_relation_val) if use_actual_relation_val is not None else False
+                use_can_seed = bool(use_canonical_seed_val) if use_canonical_seed_val is not None else False
+                do_smooth = bool(smooth_val) if smooth_val is not None else False
+                half_kernel = int(smooth_kernel_val) if smooth_kernel_val is not None else 4
                 use_mesh = bool(use_mesh_val) if use_mesh_val is not None else False
                 return app.visualize_reconstruction_from_tokens(
                     idx,
                     use_continuous_concatenation=use_continuous,
                     use_actual_relation=use_actual,
+                    use_canonical_seed=use_can_seed,
+                    smooth_boundaries=do_smooth,
+                    smooth_boundary_half_kernel=half_kernel,
                     use_mesh=use_mesh,
                 )
             except Exception as e:
@@ -4403,7 +4478,7 @@ def create_interface():
         # Reconstruction
         recon_btn.click(
             fn=on_reconstruct,
-            inputs=[sample_idx, use_continuous_recon, use_actual_relation, use_mesh_recon],
+            inputs=[sample_idx, use_continuous_recon, use_actual_relation, use_canonical_seed, smooth_boundaries, smooth_boundary_half_kernel, use_mesh_recon],
             outputs=[recon_leader_video, recon_follower_video, recon_combined_video, relationship_plot, recon_mesh_video, recon_info]
         )
         
