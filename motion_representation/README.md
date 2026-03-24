@@ -4,8 +4,11 @@ VAE visualization app is used to check clustering results
 
 TODO:
 Make new model in motion representaiton -> models
+
 train script in motion representation
+
 edit configs in motion model
+
 splitting is done in caching, need to edit the file for caching to change split for 2,4,6,8,10,20
 
 train - create dataloader
