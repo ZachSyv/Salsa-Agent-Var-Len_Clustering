@@ -5,9 +5,9 @@ VAE visualization app is used to check clustering results
 TODO:
 Make new model in motion representaiton -> models
 
-train script in motion representation
+train script in motion representation, need to modify to use our new model and caching method
 
-splitting is done in caching (create dataloader function)
+splitting is done in caching (model representation -> data -> motion_dataset.py)
 
 train - create dataloader
     this function extracts windows from clip where the 20 fps us used, which is set in a config motion representation -> config.py. need to edit the file for caching to change split for 2,4,6,8,10,20
