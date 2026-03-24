@@ -1,4 +1,4 @@
-# Variable Length Clustering Info is in Motion Representation Dir
+# Variable Length Clustering Info is in Motion Representation Dir on Dev Branch
 
 ## Salsa as a Nonverbal Embodied Language–The CoMPAS3D Dataset and Benchmarks
 
