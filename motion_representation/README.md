@@ -7,12 +7,10 @@ Make new model in motion representaiton -> models
 
 train script in motion representation
 
-edit configs in motion model
-
-splitting is done in caching, need to edit the file for caching to change split for 2,4,6,8,10,20
+splitting is done in caching (create dataloader function)
 
 train - create dataloader
-    this function extracts windows from clip where the 20 fps us used, which is set in a config motion representation -> config.py
+    this function extracts windows from clip where the 20 fps us used, which is set in a config motion representation -> config.py. need to edit the file for caching to change split for 2,4,6,8,10,20
 
 
 # Motion Representation Learning for Salsa Dance Pairs
