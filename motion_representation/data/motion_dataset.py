@@ -15,6 +15,8 @@ import pickle
 from typing import Tuple, Optional
 from tqdm import tqdm
 
+from torch.nn.utils.rnn import pad_sequence # For variable-length sequence padding in collate function
+
 # Debug flag for detailed verification output (set to True for debugging)
 DEBUG = False
 
@@ -192,7 +194,8 @@ class MotionWindowDataset(Dataset):
                     for window in windows_from_clip:
                         with cache_env.begin(write=True) as txn:
                             key = "{:010}".format(window_idx).encode("ascii")
-                            value = pyarrow.serialize(window).to_buffer()
+                            #value = pyarrow.serialize(window).to_buffer()
+                            value = pickle.dumps(window)
                             txn.put(key, value)
                             window_idx += 1
                     
@@ -620,7 +623,22 @@ class MotionWindowDataset(Dataset):
             if sample is None:
                 raise IndexError(f"Index {idx} (cache_idx={cache_idx}) out of range")
             
-            cached_item = pyarrow.deserialize(sample)
+            # cached_item = pyarrow.deserialize(sample)
+            if isinstance(sample, bytes):
+                # We hunt for the start of the pickle object (usually offset 8, 12, or 16)
+                cached_item = None
+                for offset in [0, 8, 12, 16, 20]:
+                    try:
+                        cached_item = pickle.loads(sample[offset:])
+                        break
+                    except Exception:
+                        continue
+                
+                if cached_item is None:
+                    raise ValueError(f"Could not unpickle cache at index {idx}. Data may be corrupted.")
+            else:
+                cached_item = sample
+                print(f"Warning: Cache data at index {idx} is not bytes. Found type: {type(sample)}. Attempting direct deserialization.")
             
             # Handle new dictionary format (cache_version 2) for InterHuman-related representations
             if isinstance(cached_item, dict) and 'cache_version' in cached_item:
@@ -695,6 +713,14 @@ class MotionWindowDataset(Dataset):
                 raise ValueError(f"Cache format is not dictionary format. Please regenerate cache with new format.")
 
 
+def variable_length_collate(batch):
+    #pad sequences in batch to max length
+    padded_motions = pad_sequence(batch, batch_first=True, padding_value=0.0)
+    lengths = torch.tensor([motion.shape[0] for motion in batch], dtype=torch.long)
+    max_length = padded_motions.size(1)
+    mask = torch.arange(max_length).expand(len(batch), max_length) < lengths.unsqueeze(1)
+    return padded_motions, mask
+
 def create_dataloader(
     args,
     lmdb_dir: str,
@@ -743,6 +769,7 @@ def create_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=True if torch.cuda.is_available() else False,
+        collate_fn=variable_length_collate
     )
     
     return dataloader

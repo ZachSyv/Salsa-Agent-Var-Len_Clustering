@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from .encdec_gru import GRUEncoder, GRUDecoder
 from .encdec_transformer import TransformerEncoder, TransformerDecoder
 from .vq_layer import VQVAE
+from .tcn_encoder import TCNEncoder
+from .tcn_decoder import TCNDecoder
 
 
 class MotionModel(nn.Module):
@@ -21,6 +23,8 @@ class MotionModel(nn.Module):
     
     def __init__(self, input_dim=263, hidden_dim=512, num_layers=2, latent_dim=512, 
                  seq_len=20, dropout=0.1, encoder_type='gru', decoder_type='gru',
+                 # TCN-specific parameters
+                 downsampling_factor=4,
                  # Transformer-specific parameters
                  num_heads=8, ff_size=2048, activation='gelu', use_vae=False,
                  # VQ-VAE parameters
@@ -80,6 +84,13 @@ class MotionModel(nn.Module):
                 dropout=dropout,
                 activation=activation
             )
+        elif encoder_type == 'tcn':
+            self.encoder = TCNEncoder(
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                latent_dim=latent_dim,
+                downsampling_factor=downsampling_factor
+            )
         else:
             raise ValueError(f"Unknown encoder_type: {encoder_type}. Must be 'gru' or 'transformer'")
         
@@ -126,6 +137,13 @@ class MotionModel(nn.Module):
                 seq_len=seq_len,
                 dropout=dropout,
                 activation=activation
+            )
+        elif decoder_type == 'tcn':
+            self.decoder = TCNDecoder(
+                latent_dim=latent_dim,  # Decoder takes latent_dim as input
+                hidden_dim=hidden_dim,
+                output_dim=input_dim,
+                downsampling_factor=downsampling_factor,
             )
         else:
             raise ValueError(f"Unknown decoder_type: {decoder_type}. Must be 'gru' or 'transformer'")

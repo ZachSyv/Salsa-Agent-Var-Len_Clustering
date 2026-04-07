@@ -513,10 +513,20 @@ class VQVAE(nn.Module):
             perplexity: Perplexity of codebook usage
             code_idx: Code indices of shape (batch,)
         """
+
+        is_sequence = (x.dim() == 3)  # check if temporal sequence
+        if is_sequence:
+            batch_size, seq_len, code_dim = x.shape
+            x = x.reshape(-1, code_dim)  # flatten sequence into batch dimension
+
         # Forward through selected quantizer
         x_q, commit_loss, perplexity = self.quantizer(x)
         
         # Get code indices for return
         code_idx = self.quantize(x)
+
+        if is_sequence:
+            x_q = x_q.reshape(batch_size, seq_len, code_dim)
+            code_idx = code_idx.reshape(batch_size, seq_len)
         
         return x_q, commit_loss, perplexity, code_idx

@@ -36,11 +36,13 @@ def get_config():
     
     # Architecture selection
     parser.add_argument('--encoder_type', type=str, default='gru',
-                        choices=['gru', 'transformer'],
+                        choices=['gru', 'transformer', 'tcn'],
                         help='Encoder architecture: gru or transformer')
     parser.add_argument('--decoder_type', type=str, default='gru',
-                        choices=['gru', 'transformer'],
+                        choices=['gru', 'transformer', 'tcn'],
                         help='Decoder architecture: gru or transformer')
+    parser.add_argument('--downsampling_factor', type=int, default=4,
+                        help='Temporal stride for 1D CNN')
     parser.add_argument('--use_vae', action='store_true', default=False,
                         help='Use VAE with reparameterization. If not set, uses vanilla autoencoder (no KL loss)')
     parser.add_argument('--use_vqvae', action='store_true', default=False,

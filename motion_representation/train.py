@@ -71,7 +71,13 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, writer=None
     optimizer.zero_grad()
     
     pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
-    for batch_idx, motion in enumerate(pbar):
+    for batch_idx, batch in enumerate(pbar):
+        if isinstance(batch, (tuple, list)) and len(batch) == 2:
+            motion, mask = batch
+            mask = mask.to(device)
+        else:
+            motion = batch
+            mask = None
         motion = motion.to(device)  # (batch, seq_len, dim)
         
         # DATA VALIDATION: Check for corrupted input data
@@ -158,8 +164,14 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, writer=None
                     raise RuntimeError("NaN detected in model outputs - training stopped")
                 
                 # Compute loss within autocast context
+                if mask is not None:
+                    mask_ext = mask.unsqueeze(-1).float()
+                    recon_motion = recon_motion * mask_ext
+                    motion_target = motion * mask_ext
+                else:
+                    motion_target = motion
                 loss, recon_loss, kl_loss, vel_loss = vae_loss(
-                    recon_motion, motion,
+                    recon_motion, motion_target,
                     recon_weight=config.recon_weight,
                     kl_weight=config.kl_weight,
                     use_vae=config.use_vae,
@@ -229,8 +241,14 @@ def train_epoch(model, dataloader, optimizer, device, epoch, config, writer=None
                 raise RuntimeError("NaN detected in model outputs - training stopped")
             
             # Compute loss
+            if mask is not None:
+                mask_ext = mask.unsqueeze(-1).float()
+                recon_motion = recon_motion * mask_ext
+                motion_target = motion * mask_ext
+            else:
+                motion_target = motion
             loss, recon_loss, kl_loss, vel_loss = vae_loss(
-                recon_motion, motion,
+                recon_motion, motion_target,
                 recon_weight=config.recon_weight,
                 kl_weight=config.kl_weight,
                 use_vae=config.use_vae,
@@ -789,6 +807,7 @@ def main():
         quantizer=getattr(config, 'quantizer', 'ema_reset'),
         vq_mu=getattr(config, 'vq_mu', 0.99),
         vq_beta=getattr(config, 'vq_beta', 1.0),
+        downsampling_factor=getattr(config, 'downsampling_factor', 4)
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -918,13 +937,18 @@ def main():
         for nb_iter in range(1, warm_up_iter):
             # Update learning rate with warm-up (matches T2M-GPT formula exactly)
             optimizer, current_lr = update_lr_warm_up(optimizer, nb_iter, warm_up_iter, base_lr)
-            
-            # Get batch (cycle if needed)
             try:
-                motion = next(train_loader_iter)
+                batch = next(train_loader_iter)
             except StopIteration:
                 train_loader_iter = iter(train_loader)
-                motion = next(train_loader_iter)
+                batch = next(train_loader_iter)
+
+            if isinstance(batch, (tuple, list)) and len(batch) == 2:
+                motion, mask = batch
+                mask = mask.to(device)
+            else:
+                motion = batch
+                mask = None
             
             motion = motion.to(device)
             
@@ -940,8 +964,14 @@ def main():
                 perplexity = 0.0
             
             # Compute loss
+            if mask is not None:
+                mask_ext = mask.unsqueeze(-1).float()
+                recon_motion = recon_motion * mask_ext
+                motion_target = motion * mask_ext
+            else:
+                motion_target = motion
             loss, recon_loss, kl_loss, vel_loss = vae_loss(
-                recon_motion, motion,
+                recon_motion, motion_target,
                 recon_weight=config.recon_weight,
                 kl_weight=config.kl_weight,
                 use_vae=config.use_vae,
