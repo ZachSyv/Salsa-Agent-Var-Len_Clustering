@@ -18,9 +18,6 @@ class ResBlock1D(nn.Module):
 class TCNEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, downsampling_factor=4):
         super().__init__()
-        
-        # Setting kernel_size and stride to the downsampling_factor with 0 padding 
-        # guarantees clean sequence compression without fractional temporal dimension dropoff.
         self.downsample = nn.Conv1d(
             in_channels=input_dim, 
             out_channels=hidden_dim, 
@@ -43,13 +40,13 @@ class TCNEncoder(nn.Module):
 
     def forward(self, x):
         # x input shape: (Batch, Time, Feature)
-        # Convert to (Batch, Channels, Time)
+        # convert to (Batch, Channels, Time)
         x = x.permute(0, 2, 1)
         
         x = self.downsample(x)
         x = self.res_blocks(x)
         x = self.to_latent(x)
         
-        # Convert back to (Batch, Downsampled_Time, Latent_Dim) for the VQ layer
+        # convert back to (Batch, Downsampled_Time, Latent_Dim) for the VQ layer
         x = x.permute(0, 2, 1)
         return x

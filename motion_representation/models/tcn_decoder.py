@@ -19,7 +19,7 @@ class TCNDecoder(nn.Module):
             ResBlock1D(hidden_dim)
         )
         
-        # ConvTranspose1d perfectly reverses the stride compression from the encoder
+        # reverses the stride compression from the encoder
         self.upsample = nn.ConvTranspose1d(
             in_channels=hidden_dim, 
             out_channels=output_dim, 
@@ -29,13 +29,13 @@ class TCNDecoder(nn.Module):
 
     def forward(self, x, first_frame=None): # accept first frame so motion_model doesnt crash
         # x input shape from VQ: (Batch, Downsampled_Time, Latent_Dim)
-        # Convert to (Batch, Channels, Time)
+        # convert to (Batch, Channels, Time)
         x = x.permute(0, 2, 1)
         
         x = self.from_latent(x)
         x = self.res_blocks(x)
         x = self.upsample(x)
         
-        # Convert back to (Batch, Restored_Time, Feature) to compute reconstruction loss
+        # convert back to (Batch, Restored_Time, Feature) to compute reconstruction loss
         x = x.permute(0, 2, 1)
         return x
